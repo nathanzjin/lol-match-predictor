@@ -1,0 +1,100 @@
+# lol-match-predictor
+
+A machine-learning model that predicts the outcome of professional League of Legends
+esports matches, trained on [Oracle's Elixir](https://oracleselixir.com/) match data.
+
+This is a **v1 / learning build**: one script, a small set of leakage-safe features,
+and a baseline vs. gradient-boosted model comparison. Tuning and additional features
+come later.
+
+## What it does
+
+For each game it builds **one row per match** (blue side vs. red side) using only
+information available *before* the game starts:
+
+- **Rolling team form** over the last 10 games (win rate, gold diff @15, kills,
+  first-tower / first-dragon / first-baron rates, vision, avg DPM/CSM) — computed
+  strictly from prior games so there is **no data leakage**.
+- **Differential features** (blue minus red) for each rolling stat.
+- **Patch** as a numeric feature.
+
+Target: did the **blue side win** (`1`) or not (`0`).
+
+## Results (v1)
+
+Trained on 2023 → mid-2025, evaluated on a temporal holdout of ~4,875 unseen
+games from mid-to-late 2025:
+
+| Model                       | Accuracy | ROC-AUC | Log-loss |
+|-----------------------------|:--------:|:-------:|:--------:|
+| Logistic Regression (baseline) | **0.616** | **0.659** | 0.649 |
+| XGBoost                     | 0.602    | 0.652   | 0.665    |
+
+- **Baseline to beat:** always predicting blue wins ~53.2% of the time (the real
+  blue-side advantage), so the model adds ~8 points over naive guessing.
+- The numbers sitting in the realistic **60–66%** range (not inflated into the 70s)
+  is the signal that there's no leakage.
+- With only ~10 mostly-linear features, **logistic regression beats XGBoost** — the
+  trees have no complex interactions to exploit yet. XGBoost should pull ahead once
+  richer features (draft, head-to-head, role-level stats) are added.
+- Most predictive feature by far: **`diff_roll_winrate`** (recent form).
+
+## Setup
+
+```bash
+python -m venv .venv && source .venv/bin/activate   # optional
+pip install -r requirements.txt
+```
+
+## Get the data
+
+The Oracle's Elixir CSVs are distributed via Google Drive and are **not committed**
+to this repo (they're large and reproducible). Fetch them into `data/raw/`:
+
+```bash
+python download_data.py
+```
+
+If the default Drive folder is rate-limited ("quota exceeded"), make your own copy
+of the folder in Google Drive, share it as *anyone with the link*, and pass it:
+
+```bash
+python download_data.py --folder "https://drive.google.com/drive/folders/<your_id>"
+```
+
+## Train
+
+```bash
+python train_v1.py
+```
+
+This loads `data/raw/`, builds features, trains both models, prints metrics and
+feature importances, and writes artifacts to `models/`:
+
+- `lol_pipeline_v1.joblib` — the full fitted pipeline (impute → scale → model)
+- `feature_cols.joblib` — feature order for inference
+- `calibration_v1.png` — calibration curve on the test set
+
+## Project layout
+
+```
+.
+├── data/raw/              # OE CSVs (git-ignored; via download_data.py)
+├── models/                # trained artifacts (git-ignored; via train_v1.py)
+├── download_data.py       # fetch OE data from Google Drive
+├── train_v1.py            # end-to-end v1 pipeline
+└── requirements.txt
+```
+
+## Roadmap
+
+- [ ] Head-to-head feature (historical win rate between the two teams)
+- [ ] Role-level differentials (e.g. `diff_mid_dpm`, `diff_jng_gd15`)
+- [ ] Leakage-safe draft/champion win-rate features
+- [ ] Hyperparameter tuning (Optuna + TimeSeriesSplit) and region as a feature
+- [ ] FastAPI `/predict` endpoint + simple web UI
+
+## Data attribution
+
+Match data courtesy of [Oracle's Elixir](https://oracleselixir.com/). Free for
+non-commercial use with attribution.
