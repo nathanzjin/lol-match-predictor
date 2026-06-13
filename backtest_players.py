@@ -41,12 +41,11 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from player_features import (
-    ROLES, PLAYER_STATS, load_player_rows, build_lineups, add_roster_continuity,
-    add_player_rolling, build_role_stat_lineups, PlayerElo, RegionAnchoredPlayerElo,
+    ROLES, PLAYER_STATS, MAJOR_REGIONS, INTL_EVENTS, load_player_rows, build_lineups,
+    add_roster_continuity, add_player_rolling, build_role_stat_lineups,
+    team_home_region, PlayerElo, RegionAnchoredPlayerElo,
 )
-from backtest import (_point_metrics, _per_game, _paired_ci, _mcnemar_p,
-                      LEAGUE_REGION, MAJOR_REGIONS)
-from backtest_tier1 import TIER1, INTL
+from backtest import _point_metrics, _per_game, _paired_ci, _mcnemar_p
 from elo import EloModel, tune
 from region_elo import RegionAnchoredElo
 
@@ -78,15 +77,6 @@ def _xgb() -> Pipeline:
 # --------------------------------------------------------------------------- #
 # Assemble one master per-(gameid, team) table, then pair into blue vs red
 # --------------------------------------------------------------------------- #
-def home_region_map(players: pd.DataFrame) -> dict[str, str]:
-    """Each team's home region = region of its most-common domestic (Tier-1) league."""
-    dom = players[players["league"].isin(TIER1)].drop_duplicates(["gameid", "teamname"])
-    if not len(dom):
-        return {}
-    home = dom.groupby("teamname")["league"].agg(lambda s: s.mode().iat[0])
-    return {t: LEAGUE_REGION.get(lg, "OTHER") for t, lg in home.items()}
-
-
 def pair_blue_red(team_tbl: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame:
     """Pivot a per-team table to one row per game with blue_/red_ columns."""
     good = team_tbl.groupby("gameid")["side"].transform("nunique").eq(2)
@@ -104,7 +94,7 @@ def pair_blue_red(team_tbl: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame
 
 def build_master() -> tuple[pd.DataFrame, list[str], dict]:
     players = load_player_rows()
-    region_of = home_region_map(players)
+    region_of = team_home_region(players)
 
     # per (gameid, team): roster + meta + continuity
     lineups = add_roster_continuity(build_lineups(players))
@@ -143,7 +133,7 @@ def build_master() -> tuple[pd.DataFrame, list[str], dict]:
     g["cross_region"] = ((g["blue_region"] != g["red_region"])
                          & g["blue_region"].isin(MAJOR_REGIONS)
                          & g["red_region"].isin(MAJOR_REGIONS))
-    g["is_intl"] = g["league"].isin(INTL)
+    g["is_intl"] = g["league"].isin(INTL_EVENTS)
 
     # per-player metadata for leaderboards: modal region + game count
     pr = players.assign(region=players["teamname"].map(lambda t: region_of.get(t, "OTHER")))
@@ -182,7 +172,7 @@ def add_team_elo(g: pd.DataFrame, k: float, home_adv: float) -> pd.DataFrame:
 
 
 def add_region_elo(g: pd.DataFrame, beta: float, k_region: float) -> pd.DataFrame:
-    m = RegionAnchoredElo(beta=beta, k_region=k_region)
+    m = RegionAnchoredElo(beta=beta, k_region=k_region, major_regions=MAJOR_REGIONS)
     diff, p = [], []
     for row in g.itertuples(index=False):
         b, br, r, rr = row.blue_teamname, row.blue_region, row.red_teamname, row.red_region

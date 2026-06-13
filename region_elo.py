@@ -45,13 +45,17 @@ K_REGIONS = (8, 16, 24, 32, 48)
 
 class RegionAnchoredElo:
     def __init__(self, beta=1.0, k_region=24.0, k_team=K_TEAM,
-                 home_adv=HOME_ADV, base=BASE, scale=SCALE):
+                 home_adv=HOME_ADV, base=BASE, scale=SCALE, major_regions=None):
         self.beta = beta
         self.k_region = k_region
         self.k_team = k_team
         self.home_adv = home_adv
         self.base = base
         self.scale = scale
+        # Which region labels count as "major" for cross-region updates. Defaults
+        # to this module's MAJOR_REGIONS; callers using a different region
+        # taxonomy (e.g. the Tier-1 player model) pass their own set.
+        self.major_regions = MAJOR_REGIONS if major_regions is None else major_regions
         self.team: dict[str, float] = {}
         self.region: dict[str, float] = {}
 
@@ -70,7 +74,7 @@ class RegionAnchoredElo:
 
     def update(self, b, breg, r, rreg, blue_won) -> float:
         p = self.expect_blue(b, breg, r, rreg)
-        is_cross = (breg != rreg) and (breg in MAJOR_REGIONS) and (rreg in MAJOR_REGIONS)
+        is_cross = (breg != rreg) and (breg in self.major_regions) and (rreg in self.major_regions)
         if is_cross:
             d = self.k_region * (blue_won - p)            # only region ratings move
             self.region[breg] = self._r(breg) + d

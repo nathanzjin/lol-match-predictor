@@ -35,22 +35,29 @@ import pandas as pd
 
 from train_v1 import MODEL_DIR
 from player_features import (
-    ROLES, PLAYER_STATS, load_player_rows, add_player_rolling, most_recent_roster,
+    ROLES, PLAYER_STATS, MAJOR_REGIONS, load_player_rows, add_player_rolling,
+    most_recent_roster, team_home_region,
 )
-from backtest_players import home_region_map
 
 
-def resolve(name: str, available: list[str]) -> str:
+def resolve(name: str, available: list[str], all_teams: list[str]) -> str:
     if name in available:
         return name
     lower = {t.lower(): t for t in available}
     if name.lower() in lower:
         return lower[name.lower()]
+    # Named team exists but isn't in a supported Tier-1 region
+    all_lower = {t.lower(): t for t in all_teams}
+    if name in all_teams or name.lower() in all_lower:
+        real = name if name in all_teams else all_lower[name.lower()]
+        sys.exit(f"'{real}' is outside the supported Tier-1 regions "
+                 f"({', '.join(MAJOR_REGIONS)}). Only Tier-1 teams are supported for "
+                 f"prediction; minor-region data is used for training only.")
     close = difflib.get_close_matches(name, available, n=5, cutoff=0.6)
     msg = f"Team '{name}' not found."
     if close:
         msg += " Did you mean: " + ", ".join(map(repr, close)) + "?"
-    sys.exit(msg + "\nUse --list to see all team names.")
+    sys.exit(msg + "\nUse --list to see supported team names.")
 
 
 def player_recent_form(rolled: pd.DataFrame, player: str, window: int) -> tuple[dict, int]:
@@ -113,7 +120,7 @@ def main() -> None:
     ap.add_argument("--window", type=int, default=10, help="Games of recent form per player (default 10)")
     ap.add_argument("--blue-roster", nargs="+", help="Override blue players, e.g. top=Zeus mid=Faker")
     ap.add_argument("--red-roster", nargs="+", help="Override red players")
-    ap.add_argument("--list", action="store_true", help="List known teams and exit")
+    ap.add_argument("--list", action="store_true", help="List supported Tier-1 teams by region and exit")
     ap.add_argument("--roster", metavar="TEAM", help="Print a team's most-recent roster and exit")
     args = ap.parse_args()
 
@@ -124,23 +131,33 @@ def main() -> None:
 
     players = load_player_rows()
     rolled = players  # raw stats per player row; recent form taken as tail-mean
-    available = sorted(players["teamname"].unique())
-    region_of = home_region_map(players)
+    all_teams = sorted(players["teamname"].unique())
+    region_of = team_home_region(players)
+    # Supported teams: only those in a Tier-1 region (minor regions are
+    # training-breadth only, never a prediction target).
+    available = sorted(t for t in all_teams if region_of.get(t) in MAJOR_REGIONS)
 
     if args.list:
-        print("\n".join(available)); return
+        by_region: dict[str, list[str]] = {r: [] for r in MAJOR_REGIONS}
+        for t in available:
+            by_region[region_of[t]].append(t)
+        print(f"Supported Tier-1 teams ({len(available)}), by region:")
+        for r in MAJOR_REGIONS:
+            print(f"\n[{r}] ({len(by_region[r])})")
+            print("  " + "\n  ".join(by_region[r]))
+        return
     if args.roster:
-        team = resolve(args.roster, available)
+        team = resolve(args.roster, available, all_teams)
         r = most_recent_roster(players, team)
-        print(f"{team} most-recent roster:")
+        print(f"{team} most-recent roster ({region_of.get(team)}):")
         for role in ROLES:
             print(f"  {role}: {r.get(role, '(unknown)')}")
         return
     if not args.blue or not args.red:
         sys.exit('Provide two teams:  python predict_v3.py "<blue>" "<red>"  (or --list)')
 
-    blue = resolve(args.blue, available)
-    red = resolve(args.red, available)
+    blue = resolve(args.blue, available, all_teams)
+    red = resolve(args.red, available, all_teams)
     if blue == red:
         sys.exit("Blue and red must be different teams.")
 

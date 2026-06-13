@@ -80,7 +80,14 @@ feature importances, and writes artifacts to `models/`:
 v1 rates *teams* and v2 added a region-anchored team rating. But a team is just
 its five players, and rosters move — transfers, subs, off-season swaps — so
 team-level signals lag every lineup change. v3 goes to the **individual-player
-level**:
+level**.
+
+**Supported regions.** Predictions are supported for Riot's Tier-1 "major
+international regions": **LCK (KR), LPL (CN), LEC (EMEA), LCS (NA), CBLOL (BR),
+LCP (APAC)**. The 2025 LTA rebrand (LCS↔LTA N, CBLOL↔LTA S) is folded back so a
+team's region is stable across seasons. Every other league (PCS, VCS, LJL, the
+academy/challenger circuits, …) is kept in the data for **training breadth** but
+is never a prediction target or a separately-calibrated region.
 
 - **Player Elo that travels with the player** — one rating per `playername`, so
   when a player changes orgs their skill goes with them and the new lineup is
@@ -128,15 +135,17 @@ predict a hypothetical matchup.
   important feature.
 - The player-level edge is **largest exactly when a lineup just changed**
   (low roster continuity) — the case team ratings handle worst.
-- **Cross-region (different major regions, n=135)**: plain player Elo is a coin
-  flip there (acc 0.541, AUC 0.629); region-anchoring rescues it to acc 0.681 /
-  AUC 0.742 (d_acc **+0.141**, McNemar p=0.011), matching the region-elo
-  specialist. The anchored *effective* leaderboard recovers real stars
-  (Chovy, Knight, 369, Peanut, Kiin, Doran…) and the right region order:
-  **CN ≈ KR ≫ EMEA > Americas > APAC**.
-- Caveat: region-anchoring only calibrates regions that actually play
-  international games (the major regions). Players in minor/"OTHER" leagues
-  never face them, so their ratings still can't be placed on a global scale.
+- **Cross-region (different Tier-1 regions, n=182)**: plain player Elo is barely
+  better than a coin flip there (acc 0.577, AUC 0.632); region-anchoring rescues
+  it to acc 0.670 / AUC 0.714, beating the region-elo specialist on log-loss and
+  AUC. The anchored *effective* leaderboard recovers real stars (Knight, Delight,
+  369, Chovy, Peanut, Kiin, Doran…) and a sensible region order:
+  **CN > KR > EMEA > BR > NA > APAC** (Brazil's recent international form above a
+  declined NA; the newer LCP last).
+- Scope note: region-anchoring only calibrates the six Tier-1 regions that
+  actually play international games. Minor-league teams stay `OTHER` — useful as
+  training breadth, but not a supported prediction target (predict_v3 rejects
+  them).
 
 ```bash
 python train_v3.py                       # fit + save models/lol_pipeline_v3.joblib
@@ -170,8 +179,8 @@ python predict_v3.py "T1" "Gen.G" --blue-roster mid=Faker   # override a player
 - [x] Role-level differentials (e.g. `diff_mid_dpm`, `diff_bot_vspm`) — see v3
 - [x] Player-level stats + roster association — see v3
 - [x] Fix player-Elo weak-region inflation (region-anchor the player ratings) — see v3
+- [x] Scope predictions to Riot Tier-1 regions (LCK/LPL/LEC/LCS/CBLOL/LCP); minor leagues are training-breadth only
 - [ ] Leakage-safe draft/champion win-rate features
-- [ ] Calibrate minor/"OTHER" regions (needs more inter-region games or a prior)
 - [ ] Hyperparameter tuning (Optuna + TimeSeriesSplit) and region as a feature
 - [ ] FastAPI `/predict` endpoint + simple web UI
 
