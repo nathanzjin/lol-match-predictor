@@ -75,6 +75,60 @@ feature importances, and writes artifacts to `models/`:
 - `feature_cols.joblib` — feature order for inference
 - `calibration_v1.png` — calibration curve on the test set
 
+## Player-level model (v3)
+
+v1 rates *teams* and v2 added a region-anchored team rating. But a team is just
+its five players, and rosters move — transfers, subs, off-season swaps — so
+team-level signals lag every lineup change. v3 goes to the **individual-player
+level**:
+
+- **Player Elo that travels with the player** — one rating per `playername`, so
+  when a player changes orgs their skill goes with them and the new lineup is
+  rated correctly from game one. A team's strength is the mean of its five
+  players' ratings.
+- **Per-role rolling stats** — each player's recent `dpm`, `cspm`, `vspm`,
+  `earned gpm`, `damageshare` and KDA, turned into per-role differentials
+  (`diff_mid_dpm`, `diff_bot_vspm`, …). These metrics exist for *partial* rows
+  too, so LPL and international games are covered (v1's `golddiffat15` features
+  silently drop them).
+- **Roster continuity** — how many starters carried over from a team's previous
+  game, flagging lineups the team-level ratings haven't caught up with.
+- **Region-anchored team rating** folded in as one more feature.
+
+Roster association: `player_features.most_recent_roster(team)` returns the five
+players a team most recently fielded per role — the "current roster" used to
+predict a hypothetical matchup.
+
+### Results (v3, temporal holdout, ~7.4k unseen games)
+
+| Model | Accuracy | Log-loss | ROC-AUC |
+|-------|:--------:|:--------:|:-------:|
+| team Elo (team rating) | 0.630 | 0.646 | 0.679 |
+| region-anchored Elo (v2 headline) | 0.632 | 0.644 | 0.682 |
+| **player Elo** (travels w/ player) | 0.644 | 0.631 | 0.698 |
+| player stats (per-role rolling) | 0.650 | 0.624 | 0.708 |
+| **combined (v3)** | **0.661** | **0.613** | **0.722** |
+
+- **Going player-level beats team-level**: player Elo tops team Elo by +1.4 pts
+  accuracy (McNemar p=0.005), and it isn't even tuned (team Elo was), so the
+  gap is conservative.
+- The **combined** model is the best the project has produced, +2.9 pts over the
+  v2 region-anchored headline. `pelo_diff` (player Elo) is the single most
+  important feature.
+- The player-level edge is **largest exactly when a lineup just changed**
+  (low roster continuity) — the case team ratings handle worst.
+- Caveat: player Elo inherits Elo's weak-region inflation (a player who farms a
+  weak league can out-rate stars), which the per-role stats and region rating
+  partly offset.
+
+```bash
+python train_v3.py                       # fit + save models/lol_pipeline_v3.joblib
+python backtest_players.py               # full comparison + significance tests
+python predict_v3.py "T1" "Gen.G"        # predict from each team's recent roster
+python predict_v3.py --roster "T1"       # show a team's most-recent roster
+python predict_v3.py "T1" "Gen.G" --blue-roster mid=Faker   # override a player
+```
+
 ## Project layout
 
 ```
@@ -82,15 +136,24 @@ feature importances, and writes artifacts to `models/`:
 ├── data/raw/              # OE CSVs (git-ignored; via download_data.py)
 ├── models/                # trained artifacts (git-ignored; via train_v1.py)
 ├── download_data.py       # fetch OE data from Google Drive
-├── train_v1.py            # end-to-end v1 pipeline
+├── train_v1.py            # end-to-end v1 pipeline (team rolling form)
+├── elo.py                 # team Elo baseline
+├── region_elo.py          # region-anchored Elo (v2)
+├── train_v2.py            # form + region-rating combined model
+├── player_features.py     # player Elo, per-role stats, roster association
+├── backtest_players.py    # player-level vs team-level comparison + stats
+├── train_v3.py            # fit + save the player-level model (project best)
+├── predict_v3.py          # predict a matchup from recent rosters
 └── requirements.txt
 ```
 
 ## Roadmap
 
 - [ ] Head-to-head feature (historical win rate between the two teams)
-- [ ] Role-level differentials (e.g. `diff_mid_dpm`, `diff_jng_gd15`)
+- [x] Role-level differentials (e.g. `diff_mid_dpm`, `diff_bot_vspm`) — see v3
+- [x] Player-level stats + roster association — see v3
 - [ ] Leakage-safe draft/champion win-rate features
+- [ ] Fix player-Elo weak-region inflation (region-anchor the player ratings too)
 - [ ] Hyperparameter tuning (Optuna + TimeSeriesSplit) and region as a feature
 - [ ] FastAPI `/predict` endpoint + simple web UI
 
