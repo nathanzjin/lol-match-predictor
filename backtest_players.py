@@ -42,7 +42,7 @@ from xgboost import XGBClassifier
 
 from player_features import (
     ROLES, PLAYER_STATS, load_player_rows, build_lineups, add_roster_continuity,
-    add_player_rolling, build_role_stat_lineups, PlayerElo,
+    add_player_rolling, build_role_stat_lineups, PlayerElo, RegionAnchoredPlayerElo,
 )
 from backtest import (_point_metrics, _per_game, _paired_ci, _mcnemar_p,
                       LEAGUE_REGION, MAJOR_REGIONS)
@@ -58,6 +58,10 @@ SEED = 7
 # the saved model and the live predictor build identical rating features.
 PELO_K, PELO_HOME = 24.0, 20.0
 RELO_BETA, RELO_KREGION = 1.25, 32.0
+# Region-anchored PLAYER Elo (cures weak-region inflation in player ratings).
+# Tuned on pre-test cross-region games; see backtest_players tuning output.
+PELO_RA_BETA, PELO_RA_KREGION = 1.0, 32.0
+PELO_RA_BETAS, PELO_RA_KREGIONS = (0.0, 0.5, 1.0, 1.5), (16.0, 32.0, 48.0)
 XGB_KW = dict(n_estimators=400, learning_rate=0.05, max_depth=4, subsample=0.8,
               colsample_bytree=0.8, min_child_weight=3, eval_metric="logloss",
               n_jobs=-1, random_state=42)
@@ -98,7 +102,7 @@ def pair_blue_red(team_tbl: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame
     return g.sort_values(["date", "gameid"]).reset_index(drop=True)
 
 
-def build_master() -> tuple[pd.DataFrame, list[str]]:
+def build_master() -> tuple[pd.DataFrame, list[str], dict]:
     players = load_player_rows()
     region_of = home_region_map(players)
 
@@ -140,7 +144,14 @@ def build_master() -> tuple[pd.DataFrame, list[str]]:
                          & g["blue_region"].isin(MAJOR_REGIONS)
                          & g["red_region"].isin(MAJOR_REGIONS))
     g["is_intl"] = g["league"].isin(INTL)
-    return g, feat
+
+    # per-player metadata for leaderboards: modal region + game count
+    pr = players.assign(region=players["teamname"].map(lambda t: region_of.get(t, "OTHER")))
+    info = {
+        "player_region": pr.groupby("playername")["region"].agg(lambda s: s.mode().iat[0]).to_dict(),
+        "player_games": players.groupby("playername")["gameid"].nunique().to_dict(),
+    }
+    return g, feat, info
 
 
 # --------------------------------------------------------------------------- #
@@ -182,6 +193,49 @@ def add_region_elo(g: pd.DataFrame, beta: float, k_region: float) -> pd.DataFram
     return g
 
 
+def add_player_elo_region(g: pd.DataFrame, beta: float, k_region: float,
+                          k: float = PELO_K, home_adv: float = PELO_HOME) -> pd.DataFrame:
+    """Replay the region-anchored player Elo; record per-side effective strength.
+
+    Mirrors add_player_elo but splits player skill from region strength and
+    feeds the per-game cross_region flag so each level updates only on the games
+    that inform it (see RegionAnchoredPlayerElo).
+    """
+    m = RegionAnchoredPlayerElo(beta=beta, k_region=k_region, k=k, home_adv=home_adv)
+    bs, rs, p = [], [], []
+    for row in g.itertuples(index=False):
+        blue = [getattr(row, f"blue_{r}") for r in ROLES]
+        red = [getattr(row, f"red_{r}") for r in ROLES]
+        breg, rreg = row.blue_region, row.red_region
+        bs.append(m.team_strength(blue, breg))
+        rs.append(m.team_strength(red, rreg))
+        p.append(m.update(blue, breg, red, rreg, float(row.target), bool(row.cross_region)))
+    g = g.assign(pelo_ra_diff=np.array(bs) - np.array(rs), pelo_ra_p=p)
+    g.attrs["pelo_ra"] = m
+    return g
+
+
+def tune_player_elo_region(g: pd.DataFrame, train_mask: np.ndarray):
+    """Grid-search beta / k_region by log-loss on pre-test CROSS-REGION games.
+
+    Cross-region games are the only ones the region term affects, so they're the
+    right (and leakage-free, online-prediction) objective - same discipline as
+    region_elo.py.
+    """
+    xr = g["cross_region"].to_numpy()
+    best = None
+    for beta in PELO_RA_BETAS:
+        for kr in PELO_RA_KREGIONS:
+            run = add_player_elo_region(g, beta, kr)
+            sel = run[train_mask & xr]
+            if len(sel) < 20:
+                continue
+            ll = _point_metrics(sel["target"].to_numpy(), sel["pelo_ra_p"].to_numpy())["log_loss"]
+            if best is None or ll < best[0]:
+                best = (ll, beta, kr)
+    return best
+
+
 # --------------------------------------------------------------------------- #
 # Reporting
 # --------------------------------------------------------------------------- #
@@ -207,23 +261,37 @@ def report(title: str, y, preds: dict[str, np.ndarray], compare: tuple[str, str]
 
 
 def main() -> None:
-    g, feat = build_master()
+    g, feat, info = build_master()
     print(f"[games] paired games with player features: {len(g):,}")
     print(f"[features] {len(feat)} player features "
           f"({len(ROLES)} roles x {len(PLAYER_STATS)} stats + career + continuity)")
 
     split = int(len(g) * TRAIN_FRAC)
     test_start = g.iloc[split]["date"]
+    train_mask = (g["date"] < test_start).to_numpy()
 
     # --- tune team-Elo on pre-test games only (same discipline as backtest.py)
     pre = g[g["date"] < test_start]
     best = tune(pre["blue_teamname"], pre["red_teamname"], pre["target"])
     print(f"[team-elo] tuned K={best['k']:.0f}, home_adv={best['home_adv']:.0f}")
 
+    # --- tune region-anchored PLAYER Elo on pre-test cross-region games
+    bra = tune_player_elo_region(g, train_mask)
+    if bra:
+        _, ra_beta, ra_kregion = bra
+        print(f"[player-elo-ra] tuned beta={ra_beta}, k_region={ra_kregion:.0f} "
+              f"(train cross-region log_loss {bra[0]:.4f})")
+    else:
+        ra_beta, ra_kregion = PELO_RA_BETA, PELO_RA_KREGION
+        print(f"[player-elo-ra] fallback beta={ra_beta}, k_region={ra_kregion:.0f}")
+
     # --- rating replays over the full ordered stream
     g = add_team_elo(g, k=best["k"], home_adv=best["home_adv"])
     g = add_player_elo(g, k=PELO_K, home_adv=PELO_HOME)
+    g = add_player_elo_region(g, beta=ra_beta, k_region=ra_kregion)
     g = add_region_elo(g, beta=RELO_BETA, k_region=RELO_KREGION)
+    pelo_model = g.attrs["pelo"]
+    pelo_ra_model = g.attrs["pelo_ra"]
 
     train, test = g.iloc[:split], g.iloc[split:]
     print(f"[split] train {len(train):,} ({train['date'].min().date()} -> {train['date'].max().date()})"
@@ -236,6 +304,13 @@ def main() -> None:
     full_pipe = _xgb().fit(train[full_cols], train["target"])
     comb_cols = full_cols + ["relo_diff"]
     comb_pipe = _xgb().fit(train[comb_cols], train["target"])
+    # region-anchored combined: swap plain player-Elo for the anchored one
+    comb_ra_cols = feat + ["pelo_ra_diff", "relo_diff"]
+    comb_ra_pipe = _xgb().fit(train[comb_ra_cols], train["target"])
+    # both ratings: let XGBoost keep plain player-Elo's overall edge AND the
+    # anchored rating's cross-region robustness
+    comb_both_cols = feat + ["pelo_diff", "pelo_ra_diff", "relo_diff"]
+    comb_both_pipe = _xgb().fit(train[comb_both_cols], train["target"])
 
     y = test["target"].to_numpy()
     preds = {
@@ -243,9 +318,12 @@ def main() -> None:
         "team-elo": test["telo_p"].to_numpy(),
         "region-elo": test["relo_p"].to_numpy(),
         "player-elo": test["pelo_p"].to_numpy(),
+        "player-elo-ra": test["pelo_ra_p"].to_numpy(),
         "player-stats": stats_pipe.predict_proba(test[feat])[:, 1],
         "player-full": full_pipe.predict_proba(test[full_cols])[:, 1],
         "combined": comb_pipe.predict_proba(test[comb_cols])[:, 1],
+        "combined-ra": comb_ra_pipe.predict_proba(test[comb_ra_cols])[:, 1],
+        "combined-both": comb_both_pipe.predict_proba(test[comb_both_cols])[:, 1],
     }
 
     def subset(mask):
@@ -253,17 +331,18 @@ def main() -> None:
         return y[m], {k: v[m] for k, v in preds.items()}
 
     yo, po = y, preds
-    report("OVERALL", yo, po, ("player-elo", "team-elo"))
-    report("OVERALL (trained models)", yo, po, ("combined", "player-full"))
+    report("OVERALL", yo, po, ("player-elo-ra", "player-elo"))
+    report("OVERALL (trained models)", yo, po, ("combined-both", "combined"))
 
     ys, ps = subset(~test["cross_region"])
-    report("INTRA-REGION", ys, ps, ("player-elo", "team-elo"))
+    report("INTRA-REGION", ys, ps, ("player-elo-ra", "player-elo"))
 
     yi, pi = subset(test["is_intl"])
-    report("INTERNATIONAL EVENTS", yi, pi, ("player-elo", "team-elo"))
+    report("INTERNATIONAL EVENTS", yi, pi, ("player-elo-ra", "player-elo"))
 
     yc, pc = subset(test["cross_region"])
-    report("CROSS-REGION", yc, pc, ("combined", "region-elo"))
+    report("CROSS-REGION", yc, pc, ("player-elo-ra", "player-elo"))
+    report("CROSS-REGION (trained)", yc, pc, ("combined-both", "combined"))
 
     # --- the core claim: player-level helps most when the lineup just changed
     print("\n\n########## ROSTER-CHANGE STRATIFICATION ##########")
@@ -279,13 +358,30 @@ def main() -> None:
                {"team-elo": ps["team-elo"], "player-elo": ps["player-elo"]},
                ("player-elo", "team-elo"))
 
-    # --- feature importance for the combined model
-    imp = comb_pipe.named_steps["model"].feature_importances_
-    print("\n[combined] top 15 features by importance:")
-    for f, v in sorted(zip(comb_cols, imp), key=lambda x: -x[1])[:15]:
+    # --- did region-anchoring fix the inflated player leaderboard?
+    print("\n\n########## PLAYER LEADERBOARD: inflation fix ##########")
+    pr, pg = info["player_region"], info["player_games"]
+    elig = [p for p, n in pg.items() if n >= 100]
+
+    def show(title, score):
+        print(f"\n[{title}] top 15 (>=100 games):")
+        for p in sorted(elig, key=lambda x: -score(x))[:15]:
+            print(f"  {score(p):7.1f}  {p:<16} ({pr.get(p, '?')}, {pg[p]}g)")
+
+    show("plain player-Elo (inflated)", lambda p: pelo_model.rating(p))
+    show("region-anchored effective", lambda p: pelo_ra_model.player_effective(p, pr.get(p, "OTHER")))
+    print("\n[player-elo-ra region strengths] (base 1500):")
+    for reg, r in sorted(pelo_ra_model.region.items(), key=lambda x: -x[1]):
+        print(f"  {reg:<10} {r:7.1f}")
+
+    # --- feature importance for the both-ratings combined model
+    imp = comb_both_pipe.named_steps["model"].feature_importances_
+    print("\n[combined-both] top 15 features by importance:")
+    for f, v in sorted(zip(comb_both_cols, imp), key=lambda x: -x[1])[:15]:
         tag = ""
         if f == "relo_diff": tag = "  <- region rating"
-        elif f == "pelo_diff": tag = "  <- player Elo"
+        elif f == "pelo_ra_diff": tag = "  <- region-anchored player Elo"
+        elif f == "pelo_diff": tag = "  <- plain player Elo"
         print(f"  {f:<22} {v:.4f}{tag}")
 
 

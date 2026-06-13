@@ -78,23 +78,32 @@ def parse_roster_overrides(items: list[str] | None) -> dict[str, str]:
     return out
 
 
-def side_features(team, roster, rolled, ratings, region_of, relo, params, window):
-    """Per-side raw pieces: role->form, role->career, mean player-Elo, region effective."""
-    base = params["pelo_params"]["base"]
-    rel = relo["params"]
-    forms, careers, elos = {}, {}, []
+def side_features(team, roster, rolled, state, region_of, window):
+    """Per-side raw pieces: role->form, role->career, plain & anchored mean
+    player-Elo, region-anchored team rating, region."""
+    pbase = state["pelo_params"]["base"]
+    ratings = state["player_ratings"]
+    ra_player, ra_region = state["player_ra_player"], state["player_ra_region"]
+    rap = state["pelo_ra_params"]
+    rel = state["relo_params"]
+    region = region_of.get(team, "OTHER")
+
+    forms, careers, elos, elos_ra = {}, {}, [], []
     for role in ROLES:
         p = roster[role]
         f, n = player_recent_form(rolled, p, window)
-        forms[role] = f
-        careers[role] = n
-        elos.append(ratings.get(p, base))
+        forms[role], careers[role] = f, n
+        elos.append(ratings.get(p, pbase))
+        # anchored effective = within-region player skill + region strength
+        eff = ra_player.get(p, rap["base"]) + rap["beta"] * (ra_region.get(region, rap["base"]) - rap["base"])
+        elos_ra.append(eff)
     mean_elo = float(np.mean(elos))
-    region = region_of.get(team, "OTHER")
-    team_r = relo["team"].get(team, rel["base"])
-    region_r = relo["region"].get(region, rel["base"])
+    mean_elo_ra = float(np.mean(elos_ra))
+
+    team_r = state["region_team"].get(team, rel["base"])
+    region_r = state["region_region"].get(region, rel["base"])
     effective = team_r + rel["beta"] * (region_r - rel["base"])
-    return forms, careers, mean_elo, effective, region
+    return forms, careers, mean_elo, mean_elo_ra, effective, region
 
 
 def main() -> None:
@@ -139,8 +148,6 @@ def main() -> None:
     features = joblib.load(MODEL_DIR / "feature_cols_v3.joblib")
     state = joblib.load(state_path)
     ratings = state["player_ratings"]
-    relo = {"team": state["region_team"], "region": state["region_region"],
-            "params": state["relo_params"]}
 
     blue_roster = most_recent_roster(players, blue)
     red_roster = most_recent_roster(players, red)
@@ -152,8 +159,8 @@ def main() -> None:
             sys.exit(f"Incomplete roster for {tag}: missing {missing}. "
                      f"Provide with --{'blue' if tag == blue else 'red'}-roster role=Player.")
 
-    bf, bc, b_elo, b_eff, b_reg = side_features(blue, blue_roster, rolled, ratings, region_of, relo, state, args.window)
-    rf, rc, r_elo, r_eff, r_reg = side_features(red, red_roster, rolled, ratings, region_of, relo, state, args.window)
+    bf, bc, b_elo, b_elo_ra, b_eff, b_reg = side_features(blue, blue_roster, rolled, state, region_of, args.window)
+    rf, rc, r_elo, r_elo_ra, r_eff, r_reg = side_features(red, red_roster, rolled, state, region_of, args.window)
 
     # Assemble the exact training feature row
     row: dict[str, float] = {}
@@ -165,6 +172,7 @@ def main() -> None:
     row["red_continuity"] = 5.0
     row["min_continuity"] = 5.0
     row["pelo_diff"] = b_elo - r_elo
+    row["pelo_ra_diff"] = b_elo_ra - r_elo_ra
     row["relo_diff"] = b_eff - r_eff
 
     X = pd.DataFrame([row])[features]
@@ -172,23 +180,24 @@ def main() -> None:
     p_red = 1.0 - p_blue
     winner, conf = (blue, p_blue) if p_blue >= 0.5 else (red, p_red)
 
-    def show_roster(tag, roster, careers, mean_elo, region):
-        print(f"  {tag}  (region {region}, mean player-Elo {mean_elo:.0f})")
+    def show_roster(tag, roster, careers, mean_elo, mean_elo_ra, region):
+        print(f"  {tag}  (region {region}, mean player-Elo {mean_elo:.0f}, anchored {mean_elo_ra:.0f})")
         for role in ROLES:
             p = roster[role]
             print(f"    {role}: {p:<16} elo={ratings.get(p, state['pelo_params']['base']):6.0f}  games={careers[role]}")
 
     print(f"\nMatchup (player-level v3 model)")
     print("BLUE")
-    show_roster(blue, blue_roster, bc, b_elo, b_reg)
+    show_roster(blue, blue_roster, bc, b_elo, b_elo_ra, b_reg)
     print("RED")
-    show_roster(red, red_roster, rc, r_elo, r_reg)
+    show_roster(red, red_roster, rc, r_elo, r_elo_ra, r_reg)
 
     print("\nKey differentials (blue - red):")
-    print(f"  player-Elo (mean)     {row['pelo_diff']:+.1f}")
-    print(f"  region-anchored team  {row['relo_diff']:+.1f}")
+    print(f"  player-Elo (mean)        {row['pelo_diff']:+.1f}")
+    print(f"  player-Elo (anchored)    {row['pelo_ra_diff']:+.1f}")
+    print(f"  region-anchored team     {row['relo_diff']:+.1f}")
     for role in ROLES:
-        print(f"  {role} dpm form         {row[f'diff_{role}_dpm']:+.1f}")
+        print(f"  {role} dpm form            {row[f'diff_{role}_dpm']:+.1f}")
 
     print("\nPrediction:")
     print(f"  P({blue} wins, blue side) = {p_blue:.1%}")

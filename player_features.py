@@ -12,11 +12,15 @@ This module turns the per-player rows in the Oracle's Elixir data into three
 kinds of pre-game signal, all leakage-safe (every number uses only games that
 finished strictly before the game being predicted):
 
-  1. Player Elo that TRAVELS WITH THE PLAYER (`PlayerElo`).
+  1. Player ratings that TRAVEL WITH THE PLAYER (`PlayerElo`,
+     `RegionAnchoredPlayerElo`).
      One rating per `playername`. A team's strength is the mean of its five
      players' ratings, so when a player changes orgs their skill goes with
-     them and the new team is rated correctly from game one. Updated on the
-     shared team result (all five move together).
+     them and the new team is rated correctly from game one. The
+     region-anchored variant additionally splits skill into within-region
+     player skill + region strength (like region_elo.py one level down), curing
+     the weak-region inflation where a player farms a soft league to the top of
+     the leaderboard.
 
   2. Per-role rolling individual stats (`add_player_rolling`).
      For each player, the trailing-window mean of metrics that exist for BOTH
@@ -122,6 +126,82 @@ class PlayerElo:
             self.ratings[pl] = self.rating(pl) + delta
         for pl in red:
             self.ratings[pl] = self.rating(pl) - delta
+        return p
+
+
+@dataclass
+class RegionAnchoredPlayerElo:
+    """Player Elo that fixes plain player-Elo's weak-region inflation.
+
+    Plain `PlayerElo` lets a player farm a weak league into a sky-high rating:
+    with no strong opponents to lose to, their number only climbs, so the
+    leaderboard fills with weak-region farmers instead of real stars. Same
+    disease region-anchored team Elo (region_elo.py) was built to cure, one
+    level down.
+
+    The cure mirrors region_elo: split a player's strength into within-region
+    skill and the strength of the region they're playing in,
+
+        effective(player, region) = player[player] + beta * (region[region] - base)
+
+    and update each level only from the games that actually inform it:
+      * within-region player skill - updated ONLY on intra-region games, so each
+        region's player ratings stay zero-sum around `base` (a player's deviation
+        from their own region's average, not an absolute that weak schedules inflate).
+      * region strength - updated ONLY on cross-region (international) games, the
+        only games that compare regions.
+
+    A team's strength is the mean of its five players' effective ratings. On
+    intra-region games the region term is identical for both sides and cancels,
+    so prediction there equals plain within-region player Elo; it only bites on
+    cross-region matchups - exactly where the inflation hurt.
+
+    `is_cross` is supplied by the caller (which owns the major-region set), so
+    this stays decoupled from the evaluation harness's region bookkeeping.
+    """
+    base: float = 1500.0
+    k: float = 24.0
+    k_region: float = 32.0
+    beta: float = 1.0
+    home_adv: float = 20.0
+    scale: float = 400.0
+    player: dict[str, float] = field(default_factory=dict)
+    region: dict[str, float] = field(default_factory=dict)
+
+    def _p(self, player: str) -> float:
+        return self.player.get(player, self.base)
+
+    def _r(self, reg: str) -> float:
+        return self.region.get(reg, self.base)
+
+    def player_effective(self, player: str, reg: str) -> float:
+        return self._p(player) + self.beta * (self._r(reg) - self.base)
+
+    def team_strength(self, players: list[str], reg: str) -> float:
+        return float(np.mean([self.player_effective(p, reg) for p in players]))
+
+    def expect_blue(self, blue, breg, red, rreg) -> float:
+        diff = (self.team_strength(blue, breg) + self.home_adv) - self.team_strength(red, rreg)
+        return 1.0 / (1.0 + 10.0 ** (-diff / self.scale))
+
+    def update(self, blue, breg, red, rreg, blue_won: float, is_cross: bool) -> float:
+        """Predict pre-game, then move the level the game informs.
+
+        Cross-region game -> only the two region ratings move (who's the
+        stronger region). Intra-region game -> only the ten player ratings move
+        (who's the stronger player within the region).
+        """
+        p = self.expect_blue(blue, breg, red, rreg)
+        if is_cross:
+            d = self.k_region * (float(blue_won) - p)
+            self.region[breg] = self._r(breg) + d
+            self.region[rreg] = self._r(rreg) - d
+        else:
+            d = self.k * (float(blue_won) - p)
+            for pl in blue:
+                self.player[pl] = self._p(pl) + d
+            for pl in red:
+                self.player[pl] = self._p(pl) - d
         return p
 
 

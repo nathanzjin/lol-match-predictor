@@ -86,6 +86,12 @@ level**:
   when a player changes orgs their skill goes with them and the new lineup is
   rated correctly from game one. A team's strength is the mean of its five
   players' ratings.
+- **Region-anchored player Elo** — the same idea as `region_elo.py`, one level
+  down: a player's strength splits into within-region skill (updated only on
+  domestic games, so it stays zero-sum around the region average) and region
+  strength (updated only on international games). This cures plain player Elo's
+  *weak-region inflation* — where a player farming a soft league out-rates real
+  stars — and turns cross-region prediction from a coin flip into a real signal.
 - **Per-role rolling stats** — each player's recent `dpm`, `cspm`, `vspm`,
   `earned gpm`, `damageshare` and KDA, turned into per-role differentials
   (`diff_mid_dpm`, `diff_bot_vspm`, …). These metrics exist for *partial* rows
@@ -94,6 +100,10 @@ level**:
 - **Roster continuity** — how many starters carried over from a team's previous
   game, flagging lineups the team-level ratings haven't caught up with.
 - **Region-anchored team rating** folded in as one more feature.
+
+The shipped model ("combined-both") feeds XGBoost **both** player ratings —
+plain player Elo for the overall edge and the region-anchored one for
+cross-region robustness — plus the per-role stats and region team rating.
 
 Roster association: `player_features.most_recent_roster(team)` returns the five
 players a team most recently fielded per role — the "current roster" used to
@@ -106,20 +116,27 @@ predict a hypothetical matchup.
 | team Elo (team rating) | 0.630 | 0.646 | 0.679 |
 | region-anchored Elo (v2 headline) | 0.632 | 0.644 | 0.682 |
 | **player Elo** (travels w/ player) | 0.644 | 0.631 | 0.698 |
+| region-anchored player Elo | 0.647 | 0.630 | 0.700 |
 | player stats (per-role rolling) | 0.650 | 0.624 | 0.708 |
-| **combined (v3)** | **0.661** | **0.613** | **0.722** |
+| **combined-both (v3)** | **0.663** | **0.615** | **0.720** |
 
 - **Going player-level beats team-level**: player Elo tops team Elo by +1.4 pts
   accuracy (McNemar p=0.005), and it isn't even tuned (team Elo was), so the
   gap is conservative.
-- The **combined** model is the best the project has produced, +2.9 pts over the
-  v2 region-anchored headline. `pelo_diff` (player Elo) is the single most
+- The **combined-both** model is the best the project has produced, +3.1 pts
+  over the v2 region-anchored headline. Plain `pelo_diff` is the single most
   important feature.
 - The player-level edge is **largest exactly when a lineup just changed**
   (low roster continuity) — the case team ratings handle worst.
-- Caveat: player Elo inherits Elo's weak-region inflation (a player who farms a
-  weak league can out-rate stars), which the per-role stats and region rating
-  partly offset.
+- **Cross-region (different major regions, n=135)**: plain player Elo is a coin
+  flip there (acc 0.541, AUC 0.629); region-anchoring rescues it to acc 0.681 /
+  AUC 0.742 (d_acc **+0.141**, McNemar p=0.011), matching the region-elo
+  specialist. The anchored *effective* leaderboard recovers real stars
+  (Chovy, Knight, 369, Peanut, Kiin, Doran…) and the right region order:
+  **CN ≈ KR ≫ EMEA > Americas > APAC**.
+- Caveat: region-anchoring only calibrates regions that actually play
+  international games (the major regions). Players in minor/"OTHER" leagues
+  never face them, so their ratings still can't be placed on a global scale.
 
 ```bash
 python train_v3.py                       # fit + save models/lol_pipeline_v3.joblib
@@ -152,8 +169,9 @@ python predict_v3.py "T1" "Gen.G" --blue-roster mid=Faker   # override a player
 - [ ] Head-to-head feature (historical win rate between the two teams)
 - [x] Role-level differentials (e.g. `diff_mid_dpm`, `diff_bot_vspm`) — see v3
 - [x] Player-level stats + roster association — see v3
+- [x] Fix player-Elo weak-region inflation (region-anchor the player ratings) — see v3
 - [ ] Leakage-safe draft/champion win-rate features
-- [ ] Fix player-Elo weak-region inflation (region-anchor the player ratings too)
+- [ ] Calibrate minor/"OTHER" regions (needs more inter-region games or a prior)
 - [ ] Hyperparameter tuning (Optuna + TimeSeriesSplit) and region as a feature
 - [ ] FastAPI `/predict` endpoint + simple web UI
 
