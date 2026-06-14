@@ -6,3 +6,7 @@ xgboost==3.2.0
 joblib==1.5.3
 matplotlib==3.11.0
 gdown==6.1.0
+
+# API serving (predict + season-performance endpoints; see api.py)
+fastapi==0.115.6
+uvicorn==0.34.0

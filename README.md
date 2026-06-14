@@ -164,6 +164,29 @@ python predict.py --roster "T1"          # show a team's most-recent roster
 python predict.py "T1" "Gen.G" --blue-roster mid=Faker   # override a player
 ```
 
+### Serve it (API + web UI)
+
+A FastAPI service (`api.py`) wraps the same predictor core (`predictor.py`) and
+serves a small web UI from `static/`:
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000   # then open http://localhost:8000
+```
+
+Endpoints (JSON under `/api`):
+
+- `GET /api/teams` — supported Tier-1 teams grouped by region
+- `GET /api/teams/{team}/roster` — a team's most-recent roster
+- `POST /api/predict` — `{blue, red, window?, blue_roster?, red_roster?}` → prediction
+- `GET /api/performance` — the model's walk-forward season track record
+
+The web UI has two tabs: **pick any two Tier-1 teams** for a live prediction
+(rosters, player Elos, key signals), and a **season tracker** that grades the
+model walk-forward on the current season's games (`season.py`: train through the
+previous year, then predict every unseen Tier-1 matchup) with a cumulative
+accuracy/log-loss chart, per-league splits, and a recent-results log. The track
+record extends automatically as new match data is downloaded through the year.
+
 ## Project layout
 
 ```
@@ -178,7 +201,11 @@ python predict.py "T1" "Gen.G" --blue-roster mid=Faker   # override a player
 ├── player_features.py     # player Elo, per-role stats, roster association
 ├── backtest_players.py    # player-level vs team-level comparison + stats
 ├── train_v3.py            # fit + save the player-level model (project best)
-├── predict.py             # predict a matchup from recent rosters (single entry point)
+├── predictor.py           # reusable prediction core (used by CLI + API)
+├── predict.py             # CLI: predict a matchup from recent rosters
+├── season.py              # walk-forward season track record
+├── api.py                 # FastAPI service (predict + performance endpoints)
+├── static/                # web UI (matchup picker + season tracker)
 └── requirements.txt
 ```
 
@@ -191,7 +218,7 @@ python predict.py "T1" "Gen.G" --blue-roster mid=Faker   # override a player
 - [x] Scope predictions to Riot Tier-1 regions (LCK/LPL/LEC/LCS/CBLOL/LCP); minor leagues are training-breadth only
 - [ ] Leakage-safe draft/champion win-rate features
 - [ ] Hyperparameter tuning (Optuna + TimeSeriesSplit) and region as a feature
-- [ ] FastAPI `/predict` endpoint + simple web UI
+- [x] FastAPI `/predict` endpoint + web UI (matchup picker + season tracker)
 
 ## Data attribution
 

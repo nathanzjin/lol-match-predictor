@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LoL Match Predictor</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>LoL Match Predictor</h1>
+    <p class="sub">Player-level model &mdash; player Elo (region-anchored) + recent per-role form. Tier-1 regions only.</p>
+    <nav class="tabs">
+      <button class="tab active" data-tab="predict">Predict a matchup</button>
+      <button class="tab" data-tab="season">Season tracker</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ===================== PREDICT TAB ===================== -->
+    <section id="predict" class="tab-panel active">
+      <div class="picker card">
+        <div class="side blue-side">
+          <label>Blue side</label>
+          <select id="blue-team"></select>
+        </div>
+        <div class="vs">vs</div>
+        <div class="side red-side">
+          <label>Red side</label>
+          <select id="red-team"></select>
+        </div>
+        <div class="controls">
+          <label title="How many recent games define each player's current form">
+            form window
+            <input id="window" type="number" min="1" max="50" value="10" />
+          </label>
+          <button id="predict-btn">Predict</button>
+          <button id="swap-btn" class="ghost" title="Swap sides">&#8646; swap</button>
+        </div>
+      </div>
+
+      <div id="predict-error" class="error hidden"></div>
+      <div id="predict-result" class="hidden"></div>
+    </section>
+
+    <!-- ===================== SEASON TAB ===================== -->
+    <section id="season" class="tab-panel">
+      <div id="season-status" class="card">Loading season track record&hellip;</div>
+      <div id="season-content" class="hidden">
+        <div id="season-cards" class="cards-row"></div>
+        <div class="card">
+          <h3>How the model has tracked through the season</h3>
+          <p class="muted" id="season-caption"></p>
+          <canvas id="season-chart" height="110"></canvas>
+        </div>
+        <div class="two-col">
+          <div class="card">
+            <h3>By league</h3>
+            <div id="by-league"></div>
+          </div>
+          <div class="card">
+            <h3>Recent graded games</h3>
+            <div id="recent-games" class="games-table"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="meta-line"></span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

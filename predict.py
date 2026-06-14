@@ -1,26 +1,13 @@
 #!/usr/bin/env python3
 """
-predict.py - predict a matchup from each team's MOST RECENT ROSTER.
+predict.py - CLI to predict a matchup from each team's MOST RECENT ROSTER.
 
-This is the project's single prediction entry point. It runs the player-level
-model trained by train_v3.py (the current best), superseding the old v1
-team-form predictor. The flow is the thing the player work was about:
-
-  1. Roster association - look up the five players each team most recently
-     fielded in each role (player_features.most_recent_roster), so the prediction
-     is about the lineups that will actually take the stage, not a stale team.
-  2. Player signals - mean player-Elo per side (ratings travel with players),
-     each player's recent per-role box-score form, and player experience.
-  3. Region context - the region-anchored player + team ratings (Tier-1 regions),
-     folded in.
-  4. Feed the blue-minus-red differentials to the saved model pipeline.
-
-Because a hypothetical matchup has no "previous game" to diff against, roster
-continuity is assumed full (5/5) - i.e. these are the teams' settled lineups.
-Override a roster on the command line to explore a sub or a transfer.
+Thin command-line wrapper over predictor.Predictor (the same core the API uses).
+It runs the player-level model trained by train_v3.py: roster association +
+player-Elo (plain & region-anchored) + per-role recent form + region rating.
 
 Predictions are supported for Riot Tier-1 region teams only (LCK/LPL/LEC/LCS/
-CBLOL/LCP); minor-region teams are used as training breadth and are rejected here.
+CBLOL/LCP); minor-region teams are training breadth and are rejected here.
 
 Examples:
   python predict.py "T1" "Gen.G"
@@ -31,50 +18,10 @@ Examples:
 """
 from __future__ import annotations
 import argparse
-import difflib
 import sys
 
-import joblib
-import numpy as np
-import pandas as pd
-
-from train_v1 import MODEL_DIR
-from player_features import (
-    ROLES, PLAYER_STATS, MAJOR_REGIONS, load_player_rows, add_player_rolling,
-    most_recent_roster, team_home_region,
-)
-
-
-def resolve(name: str, available: list[str], all_teams: list[str]) -> str:
-    if name in available:
-        return name
-    lower = {t.lower(): t for t in available}
-    if name.lower() in lower:
-        return lower[name.lower()]
-    # Named team exists but isn't in a supported Tier-1 region
-    all_lower = {t.lower(): t for t in all_teams}
-    if name in all_teams or name.lower() in all_lower:
-        real = name if name in all_teams else all_lower[name.lower()]
-        sys.exit(f"'{real}' is outside the supported Tier-1 regions "
-                 f"({', '.join(MAJOR_REGIONS)}). Only Tier-1 teams are supported for "
-                 f"prediction; minor-region data is used for training only.")
-    close = difflib.get_close_matches(name, available, n=5, cutoff=0.6)
-    msg = f"Team '{name}' not found."
-    if close:
-        msg += " Did you mean: " + ", ".join(map(repr, close)) + "?"
-    sys.exit(msg + "\nUse --list to see supported team names.")
-
-
-def player_recent_form(rolled: pd.DataFrame, player: str, window: int) -> tuple[dict, int]:
-    """Mean of a player's last `window` games for each stat + their game count.
-
-    Uses the raw stat columns (not the shifted rolling ones): for a *future*
-    game we want the player's latest form, so the most recent games are included.
-    """
-    sub = rolled[rolled["playername"] == player].sort_values(["date", "gameid"])
-    tail = sub.tail(window)
-    form = {s: float(tail[s].mean()) if len(tail) else np.nan for s in PLAYER_STATS}
-    return form, int(len(sub))
+from player_features import ROLES
+from predictor import Predictor, PredictError
 
 
 def parse_roster_overrides(items: list[str] | None) -> dict[str, str]:
@@ -90,34 +37,6 @@ def parse_roster_overrides(items: list[str] | None) -> dict[str, str]:
     return out
 
 
-def side_features(team, roster, rolled, state, region_of, window):
-    """Per-side raw pieces: role->form, role->career, plain & anchored mean
-    player-Elo, region-anchored team rating, region."""
-    pbase = state["pelo_params"]["base"]
-    ratings = state["player_ratings"]
-    ra_player, ra_region = state["player_ra_player"], state["player_ra_region"]
-    rap = state["pelo_ra_params"]
-    rel = state["relo_params"]
-    region = region_of.get(team, "OTHER")
-
-    forms, careers, elos, elos_ra = {}, {}, [], []
-    for role in ROLES:
-        p = roster[role]
-        f, n = player_recent_form(rolled, p, window)
-        forms[role], careers[role] = f, n
-        elos.append(ratings.get(p, pbase))
-        # anchored effective = within-region player skill + region strength
-        eff = ra_player.get(p, rap["base"]) + rap["beta"] * (ra_region.get(region, rap["base"]) - rap["base"])
-        elos_ra.append(eff)
-    mean_elo = float(np.mean(elos))
-    mean_elo_ra = float(np.mean(elos_ra))
-
-    team_r = state["region_team"].get(team, rel["base"])
-    region_r = state["region_region"].get(region, rel["base"])
-    effective = team_r + rel["beta"] * (region_r - rel["base"])
-    return forms, careers, mean_elo, mean_elo_ra, effective, region
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="Predict a LoL matchup from recent rosters (player-level model).")
     ap.add_argument("blue", nargs="?", help="Blue-side team")
@@ -129,102 +48,66 @@ def main() -> None:
     ap.add_argument("--roster", metavar="TEAM", help="Print a team's most-recent roster and exit")
     args = ap.parse_args()
 
-    pipe_path = MODEL_DIR / "lol_pipeline_v3.joblib"
-    state_path = MODEL_DIR / "rating_state_v3.joblib"
-    if not pipe_path.exists() or not state_path.exists():
-        sys.exit("Model artifacts missing. Train first:  python train_v3.py")
-
-    players = load_player_rows()
-    rolled = players  # raw stats per player row; recent form taken as tail-mean
-    all_teams = sorted(players["teamname"].unique())
-    region_of = team_home_region(players)
-    # Supported teams: only those in a Tier-1 region (minor regions are
-    # training-breadth only, never a prediction target).
-    available = sorted(t for t in all_teams if region_of.get(t) in MAJOR_REGIONS)
+    try:
+        predictor = Predictor()
+    except FileNotFoundError as e:
+        sys.exit(str(e))
 
     if args.list:
-        by_region: dict[str, list[str]] = {r: [] for r in MAJOR_REGIONS}
-        for t in available:
-            by_region[region_of[t]].append(t)
-        print(f"Supported Tier-1 teams ({len(available)}), by region:")
-        for r in MAJOR_REGIONS:
-            print(f"\n[{r}] ({len(by_region[r])})")
-            print("  " + "\n  ".join(by_region[r]))
+        by_region = predictor.teams_by_region()
+        total = sum(len(v) for v in by_region.values())
+        print(f"Supported Tier-1 teams ({total}), by region:")
+        for r, teams in by_region.items():
+            print(f"\n[{r}] ({len(teams)})")
+            print("  " + "\n  ".join(teams))
         return
+
     if args.roster:
-        team = resolve(args.roster, available, all_teams)
-        r = most_recent_roster(players, team)
-        print(f"{team} most-recent roster ({region_of.get(team)}):")
+        try:
+            team = predictor.resolve(args.roster)
+        except PredictError as e:
+            sys.exit(str(e))
+        r = predictor.roster(team)
+        print(f"{team} most-recent roster ({predictor.region_of.get(team)}):")
         for role in ROLES:
             print(f"  {role}: {r.get(role, '(unknown)')}")
         return
+
     if not args.blue or not args.red:
         sys.exit('Provide two teams:  python predict.py "<blue>" "<red>"  (or --list)')
 
-    blue = resolve(args.blue, available, all_teams)
-    red = resolve(args.red, available, all_teams)
-    if blue == red:
-        sys.exit("Blue and red must be different teams.")
+    try:
+        res = predictor.predict(
+            args.blue, args.red, window=args.window,
+            blue_overrides=parse_roster_overrides(args.blue_roster),
+            red_overrides=parse_roster_overrides(args.red_roster))
+    except PredictError as e:
+        sys.exit(str(e))
 
-    pipe = joblib.load(pipe_path)
-    features = joblib.load(MODEL_DIR / "feature_cols_v3.joblib")
-    state = joblib.load(state_path)
-    ratings = state["player_ratings"]
+    blue, red = res["blue"], res["red"]
 
-    blue_roster = most_recent_roster(players, blue)
-    red_roster = most_recent_roster(players, red)
-    blue_roster.update(parse_roster_overrides(args.blue_roster))
-    red_roster.update(parse_roster_overrides(args.red_roster))
-    for tag, roster in [(blue, blue_roster), (red, red_roster)]:
-        missing = [r for r in ROLES if r not in roster]
-        if missing:
-            sys.exit(f"Incomplete roster for {tag}: missing {missing}. "
-                     f"Provide with --{'blue' if tag == blue else 'red'}-roster role=Player.")
+    def show(side):
+        print(f"  {side['team']}  (region {side['region']}, mean player-Elo "
+              f"{side['mean_elo']:.0f}, anchored {side['anchored_elo']:.0f})")
+        for p in side["roster"]:
+            print(f"    {p['role']}: {p['player']:<16} elo={p['elo']:6.0f}  games={p['games']}")
 
-    bf, bc, b_elo, b_elo_ra, b_eff, b_reg = side_features(blue, blue_roster, rolled, state, region_of, args.window)
-    rf, rc, r_elo, r_elo_ra, r_eff, r_reg = side_features(red, red_roster, rolled, state, region_of, args.window)
+    print("\nMatchup (player-level model)")
+    print("BLUE"); show(blue)
+    print("RED"); show(red)
 
-    # Assemble the exact training feature row
-    row: dict[str, float] = {}
-    for role in ROLES:
-        for s in PLAYER_STATS:
-            row[f"diff_{role}_{s}"] = bf[role][s] - rf[role][s]
-        row[f"diff_{role}_career"] = bc[role] - rc[role]
-    row["blue_continuity"] = 5.0      # hypothetical settled lineups
-    row["red_continuity"] = 5.0
-    row["min_continuity"] = 5.0
-    row["pelo_diff"] = b_elo - r_elo
-    row["pelo_ra_diff"] = b_elo_ra - r_elo_ra
-    row["relo_diff"] = b_eff - r_eff
-
-    X = pd.DataFrame([row])[features]
-    p_blue = float(pipe.predict_proba(X)[:, 1][0])
-    p_red = 1.0 - p_blue
-    winner, conf = (blue, p_blue) if p_blue >= 0.5 else (red, p_red)
-
-    def show_roster(tag, roster, careers, mean_elo, mean_elo_ra, region):
-        print(f"  {tag}  (region {region}, mean player-Elo {mean_elo:.0f}, anchored {mean_elo_ra:.0f})")
-        for role in ROLES:
-            p = roster[role]
-            print(f"    {role}: {p:<16} elo={ratings.get(p, state['pelo_params']['base']):6.0f}  games={careers[role]}")
-
-    print(f"\nMatchup (player-level model)")
-    print("BLUE")
-    show_roster(blue, blue_roster, bc, b_elo, b_elo_ra, b_reg)
-    print("RED")
-    show_roster(red, red_roster, rc, r_elo, r_elo_ra, r_reg)
-
+    d = res["diffs"]
     print("\nKey differentials (blue - red):")
-    print(f"  player-Elo (mean)        {row['pelo_diff']:+.1f}")
-    print(f"  player-Elo (anchored)    {row['pelo_ra_diff']:+.1f}")
-    print(f"  region-anchored team     {row['relo_diff']:+.1f}")
+    print(f"  player-Elo (mean)        {d['pelo_diff']:+.1f}")
+    print(f"  player-Elo (anchored)    {d['pelo_ra_diff']:+.1f}")
+    print(f"  region-anchored team     {d['relo_diff']:+.1f}")
     for role in ROLES:
-        print(f"  {role} dpm form            {row[f'diff_{role}_dpm']:+.1f}")
+        print(f"  {role} dpm form            {d['role_dpm'][role]:+.1f}")
 
     print("\nPrediction:")
-    print(f"  P({blue} wins, blue side) = {p_blue:.1%}")
-    print(f"  P({red} wins, red side)   = {p_red:.1%}")
-    print(f"  -> {winner} favored ({conf:.1%})")
+    print(f"  P({blue['team']} wins, blue side) = {res['p_blue']:.1%}")
+    print(f"  P({red['team']} wins, red side)   = {res['p_red']:.1%}")
+    print(f"  -> {res['winner']} favored ({res['confidence']:.1%})")
     print("\nNote: blue side carries a ~53% base-rate edge; swapping sides shifts the number.")
 
 
