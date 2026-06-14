@@ -53,7 +53,7 @@ warnings.filterwarnings("ignore")
 
 TRAIN_FRAC = 0.80
 SEED = 7
-# Player-Elo and region-anchored-Elo params reused by train_v3/predict_v3 so
+# Player-Elo and region-anchored-Elo params reused by train_v3/predict so
 # the saved model and the live predictor build identical rating features.
 PELO_K, PELO_HOME = 24.0, 20.0
 # Region-anchored TEAM Elo (region_elo.py) used as the `relo_diff` feature. Same

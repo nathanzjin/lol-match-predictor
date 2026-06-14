@@ -10,7 +10,7 @@ feeds XGBoost BOTH player ratings - plain player-Elo for the overall edge and
 the region-anchored one for cross-region robustness - plus per-role rolling
 box-score stats and the region-anchored team rating.
 
-This trains that model and saves everything predict_v3.py needs:
+This trains that model and saves everything predict.py needs:
   * the fitted XGBoost pipeline + its feature order
   * the final plain player-Elo ratings (per player)
   * the final region-anchored player-Elo state (player + region tables)

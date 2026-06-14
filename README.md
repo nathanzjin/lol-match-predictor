@@ -153,15 +153,15 @@ predict a hypothetical matchup.
     `k_region` ranked BR above NA off BR's 27-game 2026 surge alone.
 - Scope note: region-anchoring only calibrates the six Tier-1 regions that
   actually play international games. Minor-league teams stay `OTHER` — useful as
-  training breadth, but not a supported prediction target (predict_v3 rejects
+  training breadth, but not a supported prediction target (predict.py rejects
   them).
 
 ```bash
 python train_v3.py                       # fit + save models/lol_pipeline_v3.joblib
 python backtest_players.py               # full comparison + significance tests
-python predict_v3.py "T1" "Gen.G"        # predict from each team's recent roster
-python predict_v3.py --roster "T1"       # show a team's most-recent roster
-python predict_v3.py "T1" "Gen.G" --blue-roster mid=Faker   # override a player
+python predict.py "T1" "Gen.G"           # predict from each team's recent roster
+python predict.py --roster "T1"          # show a team's most-recent roster
+python predict.py "T1" "Gen.G" --blue-roster mid=Faker   # override a player
 ```
 
 ## Project layout
@@ -178,7 +178,7 @@ python predict_v3.py "T1" "Gen.G" --blue-roster mid=Faker   # override a player
 ├── player_features.py     # player Elo, per-role stats, roster association
 ├── backtest_players.py    # player-level vs team-level comparison + stats
 ├── train_v3.py            # fit + save the player-level model (project best)
-├── predict_v3.py          # predict a matchup from recent rosters
+├── predict.py             # predict a matchup from recent rosters (single entry point)
 └── requirements.txt
 ```
 
