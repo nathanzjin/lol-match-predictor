@@ -1,3 +1,13 @@
+---
+title: LoL Match Predictor
+emoji: 🎮
+colorFrom: blue
+colorTo: red
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
 # lol-match-predictor
 
 Predicts the outcome of professional League of Legends matches from the **players
@@ -125,6 +135,24 @@ docker run -p 8000:8000 lol-predictor
 **Fly.io**, or **Hugging Face Spaces** (Docker SDK). Point them at this repo /
 Dockerfile, give the instance ≥2 GB RAM, and they'll build and serve it. Rebuild
 to refresh the data and extend the season track record.
+
+### Hugging Face Spaces (free)
+
+The YAML header at the top of this README configures a Docker Space
+(`sdk: docker`, `app_port: 8000`). The free **CPU basic** hardware has enough RAM
+for the in-memory data (Render's free 512 MB tier does not).
+
+1. Create a new Space at <https://huggingface.co/new-space> — **SDK: Docker**,
+   hardware **CPU basic (free)**.
+2. Push this repo to the Space's git remote (the data and model aren't committed;
+   the Dockerfile downloads + trains them during the build):
+   ```bash
+   git remote add space https://huggingface.co/spaces/<you>/<space-name>
+   git push space HEAD:main
+   ```
+3. The first build takes a few minutes (download ~290 MB + train). Once it's up,
+   the Season tab needs ~30–60s on first load while it replays history, then it's
+   cached.
 
 **About Vercel:** Vercel is great for the *static frontend* but a poor fit for
 this *backend* — serverless functions have tight size, memory, and execution-time
