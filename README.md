@@ -1,179 +1,167 @@
 # lol-match-predictor
 
-A machine-learning model that predicts the outcome of professional League of Legends
-esports matches, trained on [Oracle's Elixir](https://oracleselixir.com/) match data.
+Predicts the outcome of professional League of Legends matches from the **players
+on each team**, trained on [Oracle's Elixir](https://oracleselixir.com/) data. It
+ships as a small web app: pick any two Tier-1 teams for a live win-probability,
+and watch the model's accuracy graded against real results as the season unfolds.
 
-This is a **v1 / learning build**: one script, a small set of leakage-safe features,
-and a baseline vs. gradient-boosted model comparison. Tuning and additional features
-come later.
+Two parts, covered below: **how the model was trained**, and **the web app**.
 
-## What it does
+---
 
-For each game it builds **one row per match** (blue side vs. red side) using only
-information available *before* the game starts:
+## How the model was trained
 
-- **Rolling team form** over the last 10 games (win rate, gold diff @15, kills,
-  first-tower / first-dragon / first-baron rates, vision, avg DPM/CSM) — computed
-  strictly from prior games so there is **no data leakage**.
-- **Differential features** (blue minus red) for each rolling stat.
-- **Patch** as a numeric feature.
+**Data.** Oracle's Elixir match data, 2023–2026 (one row per player and per team,
+per game). It's large and reproducible, so it's not in git — `download_data.py`
+fetches it into `data/raw/`. Everything is **leakage-safe**: games are ordered by
+date with a temporal train/test split, and all ratings are computed online
+(predict a game from pre-game state, *then* update).
 
-Target: did the **blue side win** (`1`) or not (`0`).
+**The approach evolved in stages** (each kept in the repo as a baseline):
 
-## Results (v1)
+1. **Team rolling form** (`train_v1.py`) — XGBoost / logistic regression over a
+   team's last-10-games form. ~60–62% accuracy.
+2. **Team Elo** (`elo.py`) — a simple opponent-strength rating that beat the form
+   model on its own.
+3. **Region-anchored Elo** (`region_elo.py`) — splits strength into within-region
+   skill + region strength, fixing cross-region (international) prediction.
+4. **Player-level model** (`train_v3.py`) — the current best. Detailed below.
 
-Trained on 2023 → mid-2025, evaluated on a temporal holdout of ~4,875 unseen
-games from mid-to-late 2025:
+**The shipped model** treats a team as its five players (rosters move — transfers,
+subs, off-season swaps — and player signals update the instant a lineup changes):
 
-| Model                       | Accuracy | ROC-AUC | Log-loss |
-|-----------------------------|:--------:|:-------:|:--------:|
-| Logistic Regression (baseline) | **0.616** | **0.659** | 0.649 |
-| XGBoost                     | 0.602    | 0.652   | 0.665    |
+- **Player Elo that travels with the player** — one rating per player; a team's
+  strength is the mean of its five. New lineups are rated correctly from game one.
+- **Region-anchored player Elo** — within-region skill + region strength, so a
+  player farming a weak league can't out-rate real stars, and cross-region games
+  become a real signal. Region strength is a slow latent (small `k_region`, tuned
+  to match the all-time head-to-head record), giving the order
+  **KR > CN > EMEA > NA > BR > APAC**.
+- **Per-role recent form** — each player's recent `dpm`, `cspm`, `vspm`,
+  `earned gpm`, `damageshare`, KDA as per-role differentials. These exist on
+  *partial* data rows too, so LPL and international games are covered.
+- **Roster continuity** — how many starters carried over from the previous game.
 
-- **Baseline to beat:** always predicting blue wins ~53.2% of the time (the real
-  blue-side advantage), so the model adds ~8 points over naive guessing.
-- The numbers sitting in the realistic **60–66%** range (not inflated into the 70s)
-  is the signal that there's no leakage.
-- With only ~10 mostly-linear features, **logistic regression beats XGBoost** — the
-  trees have no complex interactions to exploit yet. XGBoost should pull ahead once
-  richer features (draft, head-to-head, role-level stats) are added.
-- Most predictive feature by far: **`diff_roll_winrate`** (recent form).
+These are combined in XGBoost ("combined-both"). **Scope:** predictions are
+supported for Riot's six Tier-1 regions — **LCK (KR), LPL (CN), LEC (EMEA),
+LCS (NA), CBLOL (BR), LCP (APAC)** (the 2025 LTA rebrands are folded back so a
+team's region is stable across seasons). Every other league is kept as training
+**breadth** but is never a prediction target.
 
-## Setup
-
-```bash
-python -m venv .venv && source .venv/bin/activate   # optional
-pip install -r requirements.txt
-```
-
-## Get the data
-
-The Oracle's Elixir CSVs are distributed via Google Drive and are **not committed**
-to this repo (they're large and reproducible). Fetch them into `data/raw/`:
-
-```bash
-python download_data.py
-```
-
-If the default Drive folder is rate-limited ("quota exceeded"), make your own copy
-of the folder in Google Drive, share it as *anyone with the link*, and pass it:
-
-```bash
-python download_data.py --folder "https://drive.google.com/drive/folders/<your_id>"
-```
-
-## Train
-
-```bash
-python train_v1.py
-```
-
-This loads `data/raw/`, builds features, trains both models, prints metrics and
-feature importances, and writes artifacts to `models/`:
-
-- `lol_pipeline_v1.joblib` — the full fitted pipeline (impute → scale → model)
-- `feature_cols.joblib` — feature order for inference
-- `calibration_v1.png` — calibration curve on the test set
-
-## Player-level model (v3)
-
-v1 rates *teams* and v2 added a region-anchored team rating. But a team is just
-its five players, and rosters move — transfers, subs, off-season swaps — so
-team-level signals lag every lineup change. v3 goes to the **individual-player
-level**:
-
-- **Player Elo that travels with the player** — one rating per `playername`, so
-  when a player changes orgs their skill goes with them and the new lineup is
-  rated correctly from game one. A team's strength is the mean of its five
-  players' ratings.
-- **Region-anchored player Elo** — the same idea as `region_elo.py`, one level
-  down: a player's strength splits into within-region skill (updated only on
-  domestic games, so it stays zero-sum around the region average) and region
-  strength (updated only on international games). This cures plain player Elo's
-  *weak-region inflation* — where a player farming a soft league out-rates real
-  stars — and turns cross-region prediction from a coin flip into a real signal.
-- **Per-role rolling stats** — each player's recent `dpm`, `cspm`, `vspm`,
-  `earned gpm`, `damageshare` and KDA, turned into per-role differentials
-  (`diff_mid_dpm`, `diff_bot_vspm`, …). These metrics exist for *partial* rows
-  too, so LPL and international games are covered (v1's `golddiffat15` features
-  silently drop them).
-- **Roster continuity** — how many starters carried over from a team's previous
-  game, flagging lineups the team-level ratings haven't caught up with.
-- **Region-anchored team rating** folded in as one more feature.
-
-The shipped model ("combined-both") feeds XGBoost **both** player ratings —
-plain player Elo for the overall edge and the region-anchored one for
-cross-region robustness — plus the per-role stats and region team rating.
-
-Roster association: `player_features.most_recent_roster(team)` returns the five
-players a team most recently fielded per role — the "current roster" used to
-predict a hypothetical matchup.
-
-### Results (v3, temporal holdout, ~7.4k unseen games)
+**Results** (temporal holdout, ~7.4k unseen games):
 
 | Model | Accuracy | Log-loss | ROC-AUC |
 |-------|:--------:|:--------:|:-------:|
-| team Elo (team rating) | 0.630 | 0.646 | 0.679 |
-| region-anchored Elo (v2 headline) | 0.632 | 0.644 | 0.682 |
-| **player Elo** (travels w/ player) | 0.644 | 0.631 | 0.698 |
-| region-anchored player Elo | 0.647 | 0.630 | 0.700 |
-| player stats (per-role rolling) | 0.650 | 0.624 | 0.708 |
-| **combined-both (v3)** | **0.663** | **0.615** | **0.720** |
+| team Elo | 0.630 | 0.646 | 0.679 |
+| region-anchored Elo | 0.632 | 0.644 | 0.682 |
+| player Elo | 0.644 | 0.631 | 0.698 |
+| **player-level (combined-both)** | **0.659** | **0.615** | **0.719** |
 
-- **Going player-level beats team-level**: player Elo tops team Elo by +1.4 pts
-  accuracy (McNemar p=0.005), and it isn't even tuned (team Elo was), so the
-  gap is conservative.
-- The **combined-both** model is the best the project has produced, +3.1 pts
-  over the v2 region-anchored headline. Plain `pelo_diff` is the single most
-  important feature.
-- The player-level edge is **largest exactly when a lineup just changed**
-  (low roster continuity) — the case team ratings handle worst.
-- **Cross-region (different major regions, n=135)**: plain player Elo is a coin
-  flip there (acc 0.541, AUC 0.629); region-anchoring rescues it to acc 0.681 /
-  AUC 0.742 (d_acc **+0.141**, McNemar p=0.011), matching the region-elo
-  specialist. The anchored *effective* leaderboard recovers real stars
-  (Chovy, Knight, 369, Peanut, Kiin, Doran…) and the right region order:
-  **CN ≈ KR ≫ EMEA > Americas > APAC**.
-- Caveat: region-anchoring only calibrates regions that actually play
-  international games (the major regions). Players in minor/"OTHER" leagues
-  never face them, so their ratings still can't be placed on a global scale.
+Going player-level beats team-level by a statistically significant margin
+(McNemar p=0.005), helps most exactly when a lineup just changed, and is the best
+the project has produced. `backtest_players.py` runs the full comparison with
+paired confidence intervals and significance tests.
 
 ```bash
-python train_v3.py                       # fit + save models/lol_pipeline_v3.joblib
-python backtest_players.py               # full comparison + significance tests
-python predict_v3.py "T1" "Gen.G"        # predict from each team's recent roster
-python predict_v3.py --roster "T1"       # show a team's most-recent roster
-python predict_v3.py "T1" "Gen.G" --blue-roster mid=Faker   # override a player
+pip install -r requirements.txt
+python download_data.py     # fetch Oracle's Elixir CSVs -> data/raw/
+python train_v3.py          # train + save the model to models/
+python predict.py "T1" "Gen.G"                      # one-off prediction (CLI)
+python predict.py "T1" "Gen.G" --blue-roster mid=Faker   # try a roster change
 ```
 
-## Project layout
+---
+
+## The web app
+
+A FastAPI backend (`api.py`) wraps the prediction core (`predictor.py`) and serves
+a static frontend (`static/`). Run it locally:
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000     # open http://localhost:8000
+```
+
+**Two tabs:**
+
+1. **Predict a matchup** — pick any two Tier-1 teams (grouped by region) and get a
+   win probability, both rosters with player Elos, and the key signals behind the
+   call.
+2. **Season tracker** — the model's *walk-forward* track record for the current
+   season (`season.py`): train on everything through the previous year, then grade
+   the model on every unseen Tier-1 matchup. Shows a cumulative accuracy / log-loss
+   chart, per-league splits, and a recent-results log. The record extends as new
+   match data is downloaded through the year.
+
+**API endpoints** (JSON under `/api`):
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/teams` | Supported Tier-1 teams grouped by region |
+| `GET /api/teams/{team}/roster` | A team's most-recent roster |
+| `POST /api/predict` | `{blue, red, window?, blue_roster?, red_roster?}` → prediction |
+| `GET /api/performance` | The model's walk-forward season track record |
+
+The season computation replays the full history once and runs in a background
+thread on startup; `/api/performance` reports `computing` until it's ready
+(~30–60s on first load), then serves the cached result.
+
+---
+
+## Deploying it
+
+The app isn't a lightweight stateless function: it loads ~290 MB of match data
+into memory and runs a ~minute-long computation for the season tracker. So it
+wants a **persistent container with ≥2 GB RAM**, not a serverless platform.
+
+A `Dockerfile` is included that bootstraps everything (downloads the data and
+trains the model at build time, then serves on `$PORT`):
+
+```bash
+docker build -t lol-predictor .
+docker run -p 8000:8000 lol-predictor
+```
+
+**Recommended hosts** (all run a container directly): **Render**, **Railway**,
+**Fly.io**, or **Hugging Face Spaces** (Docker SDK). Point them at this repo /
+Dockerfile, give the instance ≥2 GB RAM, and they'll build and serve it. Rebuild
+to refresh the data and extend the season track record.
+
+**About Vercel:** Vercel is great for the *static frontend* but a poor fit for
+this *backend* — serverless functions have tight size, memory, and execution-time
+limits and cold-start fresh, which clashes with loading 290 MB of data and a
+minute-long season computation. If you specifically want Vercel, the clean split
+is: host the `static/` frontend on Vercel and point it at the FastAPI API running
+on one of the container hosts above (set the API base URL in `static/app.js`).
+
+---
+
+## Repo layout
 
 ```
 .
-├── data/raw/              # OE CSVs (git-ignored; via download_data.py)
-├── models/                # trained artifacts (git-ignored; via train_v1.py)
-├── download_data.py       # fetch OE data from Google Drive
-├── train_v1.py            # end-to-end v1 pipeline (team rolling form)
-├── elo.py                 # team Elo baseline
-├── region_elo.py          # region-anchored Elo (v2)
-├── train_v2.py            # form + region-rating combined model
-├── player_features.py     # player Elo, per-role stats, roster association
-├── backtest_players.py    # player-level vs team-level comparison + stats
-├── train_v3.py            # fit + save the player-level model (project best)
-├── predict_v3.py          # predict a matchup from recent rosters
-└── requirements.txt
+├── download_data.py       # fetch Oracle's Elixir data -> data/raw/ (git-ignored)
+├── player_features.py     # player Elo, region-anchored player Elo, per-role stats, rosters
+├── train_v3.py            # train + save the player-level model -> models/ (git-ignored)
+├── backtest_players.py    # player-level vs team-level comparison + significance tests
+├── predictor.py           # reusable prediction core (used by the CLI and the API)
+├── predict.py             # CLI: predict a matchup from recent rosters
+├── season.py              # walk-forward season track record
+├── api.py                 # FastAPI service (predict + performance endpoints)
+├── static/                # web UI (matchup picker + season tracker)
+├── Dockerfile             # build = fetch data + train; run = serve uvicorn
+├── train_v1.py            # baseline: team rolling-form model
+├── elo.py / region_elo.py # baseline rating systems (team / region-anchored)
+└── backtest*.py           # evaluation harnesses + shared metrics
 ```
 
 ## Roadmap
 
+- [x] Player-level model: player Elo (region-anchored) + per-role stats + roster association
+- [x] Tier-1 region scope; minor leagues used as training breadth only
+- [x] FastAPI service + web UI (matchup picker + season tracker)
 - [ ] Head-to-head feature (historical win rate between the two teams)
-- [x] Role-level differentials (e.g. `diff_mid_dpm`, `diff_bot_vspm`) — see v3
-- [x] Player-level stats + roster association — see v3
-- [x] Fix player-Elo weak-region inflation (region-anchor the player ratings) — see v3
-- [ ] Leakage-safe draft/champion win-rate features
-- [ ] Calibrate minor/"OTHER" regions (needs more inter-region games or a prior)
-- [ ] Hyperparameter tuning (Optuna + TimeSeriesSplit) and region as a feature
-- [ ] FastAPI `/predict` endpoint + simple web UI
+- [ ] Leakage-safe draft / champion win-rate features
+- [ ] Hyperparameter tuning (Optuna + TimeSeriesSplit)
 
 ## Data attribution
 

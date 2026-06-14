@@ -54,6 +54,23 @@ DATA_DIR = Path("data/raw")
 YEARS = [2023, 2024, 2025, 2026]
 ROLES = ["top", "jng", "mid", "bot", "sup"]
 
+# Riot's Tier-1 "major international regions" - the only regions we support in
+# predictions. Each Tier-1 league maps to a region code; the 2025 LTA rebrand
+# (LCS -> LTA N, CBLOL -> LTA S) is folded back so a team's region stays stable
+# across seasons. APAC's Tier-1 league is LCP (2025+); the older PCS/VCS/LJL and
+# every other league fall through to OTHER - kept in the data for training
+# breadth, but never a prediction target or a separately-calibrated region.
+TIER1_REGION = {
+    "LCK": "KR",                          # Korea
+    "LPL": "CN",                          # China
+    "LEC": "EMEA",                        # Europe / Middle East / Africa
+    "LCS": "NA", "LTA N": "NA",           # Americas North
+    "CBLOL": "BR", "LTA S": "BR",         # Americas South (Brazil / LATAM)
+    "LCP": "APAC",                        # Asia-Pacific (2025+ restructure)
+}
+MAJOR_REGIONS = ("KR", "CN", "EMEA", "NA", "BR", "APAC")
+INTL_EVENTS = {"WLDs", "MSI", "EWC", "FST"}   # international events (cross-region)
+
 # Stats present for BOTH complete and partial rows (keeps LPL + international in
 # scope). golddiffat15/xpdiffat15 are deliberately excluded: null for partials.
 PLAYER_STATS = ["dpm", "cspm", "vspm", "earned gpm", "damageshare", "kda"]
@@ -327,6 +344,22 @@ def add_roster_continuity(lineups: pd.DataFrame) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # Roster association: the "most recent roster" for a hypothetical matchup
 # --------------------------------------------------------------------------- #
+def team_home_region(players: pd.DataFrame) -> dict[str, str]:
+    """Map each team to its supported Tier-1 region.
+
+    A team's region is the region of the Tier-1 league it most often plays in
+    (LTA rebrands folded back via TIER1_REGION). Teams that never appear in a
+    Tier-1 league return nothing here -> treated as OTHER by callers: their games
+    still train within-region skill (breadth), but they aren't a supported
+    prediction target and don't get a separately-calibrated region rating.
+    """
+    dom = players[players["league"].isin(TIER1_REGION)].drop_duplicates(["gameid", "teamname"])
+    if not len(dom):
+        return {}
+    home = dom.groupby("teamname")["league"].agg(lambda s: s.mode().iat[0])
+    return {t: TIER1_REGION[lg] for t, lg in home.items()}
+
+
 def most_recent_roster(players: pd.DataFrame, team: str,
                        as_of: pd.Timestamp | None = None) -> dict[str, str]:
     """The five players a team most recently fielded in each role before `as_of`.

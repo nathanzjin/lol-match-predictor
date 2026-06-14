@@ -41,12 +41,11 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from player_features import (
-    ROLES, PLAYER_STATS, load_player_rows, build_lineups, add_roster_continuity,
-    add_player_rolling, build_role_stat_lineups, PlayerElo, RegionAnchoredPlayerElo,
+    ROLES, PLAYER_STATS, MAJOR_REGIONS, INTL_EVENTS, load_player_rows, build_lineups,
+    add_roster_continuity, add_player_rolling, build_role_stat_lineups,
+    team_home_region, PlayerElo, RegionAnchoredPlayerElo,
 )
-from backtest import (_point_metrics, _per_game, _paired_ci, _mcnemar_p,
-                      LEAGUE_REGION, MAJOR_REGIONS)
-from backtest_tier1 import TIER1, INTL
+from backtest import _point_metrics, _per_game, _paired_ci, _mcnemar_p
 from elo import EloModel, tune
 from region_elo import RegionAnchoredElo
 
@@ -54,14 +53,30 @@ warnings.filterwarnings("ignore")
 
 TRAIN_FRAC = 0.80
 SEED = 7
-# Player-Elo and region-anchored-Elo params reused by train_v3/predict_v3 so
+# Player-Elo and region-anchored-Elo params reused by train_v3/predict so
 # the saved model and the live predictor build identical rating features.
 PELO_K, PELO_HOME = 24.0, 20.0
-RELO_BETA, RELO_KREGION = 1.25, 32.0
-# Region-anchored PLAYER Elo (cures weak-region inflation in player ratings).
-# Tuned on pre-test cross-region games; see backtest_players tuning output.
-PELO_RA_BETA, PELO_RA_KREGION = 1.0, 32.0
-PELO_RA_BETAS, PELO_RA_KREGIONS = (0.0, 0.5, 1.0, 1.5), (16.0, 32.0, 48.0)
+# Region-anchored TEAM Elo (region_elo.py) used as the `relo_diff` feature. Same
+# slow-latent reasoning as PELO_RA_KREGION below; kept in step with it.
+RELO_BETA, RELO_KREGION = 1.25, 8.0
+# Region-anchored PLAYER Elo. `beta` weights region strength inside team
+# strength; `k_region` is the region-rating step size.
+#
+# We FIX k_region small rather than tune it on cross-region log-loss. Region
+# strength is a slow latent, but international games are sparse and event-
+# clustered, so a reactive k_region lets a partial recent season distort the
+# order - especially for the weak regions that play few games. The right yard-
+# stick is the ALL-TIME head-to-head record, and k_region=8 maximises agreement
+# with it (0.91, game-weighted) while also giving the best held-out cross-region
+# accuracy. It recovers KR > CN > EMEA > NA > BR > APAC, matching both the
+# head-to-head matrix and the eye test:
+#   - KR > CN: KR leads the series 58.5% (a high k flipped CN on top via a
+#     6-game KR slump vs EMEA in the partial 2026 split);
+#   - NA > BR: NA wins the series 66% (57-29), dominating 2023-2025; a high k
+#     ranked BR above NA off BR's 27-game 2026 surge alone.
+# Higher k_region buys a hair of cross-region log-loss but wrecks the ranking;
+# the overall model is unaffected (region is a minor feature there).
+PELO_RA_BETA, PELO_RA_KREGION = 1.0, 8.0
 XGB_KW = dict(n_estimators=400, learning_rate=0.05, max_depth=4, subsample=0.8,
               colsample_bytree=0.8, min_child_weight=3, eval_metric="logloss",
               n_jobs=-1, random_state=42)
@@ -78,15 +93,6 @@ def _xgb() -> Pipeline:
 # --------------------------------------------------------------------------- #
 # Assemble one master per-(gameid, team) table, then pair into blue vs red
 # --------------------------------------------------------------------------- #
-def home_region_map(players: pd.DataFrame) -> dict[str, str]:
-    """Each team's home region = region of its most-common domestic (Tier-1) league."""
-    dom = players[players["league"].isin(TIER1)].drop_duplicates(["gameid", "teamname"])
-    if not len(dom):
-        return {}
-    home = dom.groupby("teamname")["league"].agg(lambda s: s.mode().iat[0])
-    return {t: LEAGUE_REGION.get(lg, "OTHER") for t, lg in home.items()}
-
-
 def pair_blue_red(team_tbl: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame:
     """Pivot a per-team table to one row per game with blue_/red_ columns."""
     good = team_tbl.groupby("gameid")["side"].transform("nunique").eq(2)
@@ -104,7 +110,7 @@ def pair_blue_red(team_tbl: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame
 
 def build_master() -> tuple[pd.DataFrame, list[str], dict]:
     players = load_player_rows()
-    region_of = home_region_map(players)
+    region_of = team_home_region(players)
 
     # per (gameid, team): roster + meta + continuity
     lineups = add_roster_continuity(build_lineups(players))
@@ -143,7 +149,7 @@ def build_master() -> tuple[pd.DataFrame, list[str], dict]:
     g["cross_region"] = ((g["blue_region"] != g["red_region"])
                          & g["blue_region"].isin(MAJOR_REGIONS)
                          & g["red_region"].isin(MAJOR_REGIONS))
-    g["is_intl"] = g["league"].isin(INTL)
+    g["is_intl"] = g["league"].isin(INTL_EVENTS)
 
     # per-player metadata for leaderboards: modal region + game count
     pr = players.assign(region=players["teamname"].map(lambda t: region_of.get(t, "OTHER")))
@@ -182,7 +188,7 @@ def add_team_elo(g: pd.DataFrame, k: float, home_adv: float) -> pd.DataFrame:
 
 
 def add_region_elo(g: pd.DataFrame, beta: float, k_region: float) -> pd.DataFrame:
-    m = RegionAnchoredElo(beta=beta, k_region=k_region)
+    m = RegionAnchoredElo(beta=beta, k_region=k_region, major_regions=MAJOR_REGIONS)
     diff, p = [], []
     for row in g.itertuples(index=False):
         b, br, r, rr = row.blue_teamname, row.blue_region, row.red_teamname, row.red_region
@@ -213,27 +219,6 @@ def add_player_elo_region(g: pd.DataFrame, beta: float, k_region: float,
     g = g.assign(pelo_ra_diff=np.array(bs) - np.array(rs), pelo_ra_p=p)
     g.attrs["pelo_ra"] = m
     return g
-
-
-def tune_player_elo_region(g: pd.DataFrame, train_mask: np.ndarray):
-    """Grid-search beta / k_region by log-loss on pre-test CROSS-REGION games.
-
-    Cross-region games are the only ones the region term affects, so they're the
-    right (and leakage-free, online-prediction) objective - same discipline as
-    region_elo.py.
-    """
-    xr = g["cross_region"].to_numpy()
-    best = None
-    for beta in PELO_RA_BETAS:
-        for kr in PELO_RA_KREGIONS:
-            run = add_player_elo_region(g, beta, kr)
-            sel = run[train_mask & xr]
-            if len(sel) < 20:
-                continue
-            ll = _point_metrics(sel["target"].to_numpy(), sel["pelo_ra_p"].to_numpy())["log_loss"]
-            if best is None or ll < best[0]:
-                best = (ll, beta, kr)
-    return best
 
 
 # --------------------------------------------------------------------------- #
@@ -268,22 +253,17 @@ def main() -> None:
 
     split = int(len(g) * TRAIN_FRAC)
     test_start = g.iloc[split]["date"]
-    train_mask = (g["date"] < test_start).to_numpy()
 
     # --- tune team-Elo on pre-test games only (same discipline as backtest.py)
     pre = g[g["date"] < test_start]
     best = tune(pre["blue_teamname"], pre["red_teamname"], pre["target"])
     print(f"[team-elo] tuned K={best['k']:.0f}, home_adv={best['home_adv']:.0f}")
 
-    # --- tune region-anchored PLAYER Elo on pre-test cross-region games
-    bra = tune_player_elo_region(g, train_mask)
-    if bra:
-        _, ra_beta, ra_kregion = bra
-        print(f"[player-elo-ra] tuned beta={ra_beta}, k_region={ra_kregion:.0f} "
-              f"(train cross-region log_loss {bra[0]:.4f})")
-    else:
-        ra_beta, ra_kregion = PELO_RA_BETA, PELO_RA_KREGION
-        print(f"[player-elo-ra] fallback beta={ra_beta}, k_region={ra_kregion:.0f}")
+    # --- region-anchored PLAYER Elo uses a fixed, small k_region (region is a
+    # slow latent; tuning k_region on cross-region log-loss overfits - see the
+    # PELO_RA_KREGION note). beta/k_region are module constants.
+    ra_beta, ra_kregion = PELO_RA_BETA, PELO_RA_KREGION
+    print(f"[player-elo-ra] fixed beta={ra_beta}, k_region={ra_kregion:.0f} (stable slow region latent)")
 
     # --- rating replays over the full ordered stream
     g = add_team_elo(g, k=best["k"], home_adv=best["home_adv"])

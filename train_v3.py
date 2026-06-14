@@ -10,7 +10,7 @@ feeds XGBoost BOTH player ratings - plain player-Elo for the overall edge and
 the region-anchored one for cross-region robustness - plus per-role rolling
 box-score stats and the region-anchored team rating.
 
-This trains that model and saves everything predict_v3.py needs:
+This trains that model and saves everything predict.py needs:
   * the fitted XGBoost pipeline + its feature order
   * the final plain player-Elo ratings (per player)
   * the final region-anchored player-Elo state (player + region tables)
@@ -27,13 +27,12 @@ from __future__ import annotations
 import warnings
 
 import joblib
-import numpy as np
 
 from train_v1 import MODEL_DIR
 from backtest import _point_metrics
 from backtest_players import (
     build_master, add_player_elo, add_player_elo_region, add_region_elo,
-    tune_player_elo_region, _xgb, TRAIN_FRAC, PELO_K, PELO_HOME,
+    _xgb, TRAIN_FRAC, PELO_K, PELO_HOME,
     RELO_BETA, RELO_KREGION, PELO_RA_BETA, PELO_RA_KREGION,
 )
 from player_features import ROLES, PLAYER_STATS
@@ -46,15 +45,11 @@ def main() -> None:
 
     g, feat, info = build_master()
 
-    # region-anchored player Elo: tune beta/k_region on ALL cross-region games
-    # (production rating wants the best region calibration the data allows)
-    bra = tune_player_elo_region(g, np.ones(len(g), dtype=bool))
-    if bra:
-        _, ra_beta, ra_kregion = bra
-        print(f"[player-elo-ra] tuned beta={ra_beta}, k_region={ra_kregion:.0f} "
-              f"(cross-region log_loss {bra[0]:.4f})")
-    else:
-        ra_beta, ra_kregion = PELO_RA_BETA, PELO_RA_KREGION
+    # region-anchored player Elo with fixed, small k_region (region is a slow
+    # latent; tuning k_region overfits and destabilises the order - see the
+    # PELO_RA_KREGION note in backtest_players)
+    ra_beta, ra_kregion = PELO_RA_BETA, PELO_RA_KREGION
+    print(f"[player-elo-ra] beta={ra_beta}, k_region={ra_kregion:.0f}")
 
     # rating features (online => leakage-free); keep the fitted models for saving
     g = add_player_elo(g, k=PELO_K, home_adv=PELO_HOME)

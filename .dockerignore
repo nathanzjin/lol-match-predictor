@@ -1,0 +1,12 @@
+# Data + model are produced during the build (download_data.py + train_v3.py),
+# so don't copy any local copies into the build context.
+data/
+models/
+
+.venv/
+venv/
+env/
+.git/
+__pycache__/
+*.py[cod]
+.DS_Store
