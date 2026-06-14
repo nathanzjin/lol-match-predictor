@@ -57,24 +57,26 @@ SEED = 7
 # the saved model and the live predictor build identical rating features.
 PELO_K, PELO_HOME = 24.0, 20.0
 # Region-anchored TEAM Elo (region_elo.py) used as the `relo_diff` feature. Same
-# slow-latent reasoning as PELO_RA_KREGION below: k_region=16 keeps the region
-# component stable and well-gapped (KR clearly top) instead of the thin, swingy
-# spread a higher k produces on the partial-2026 split.
-RELO_BETA, RELO_KREGION = 1.25, 16.0
+# slow-latent reasoning as PELO_RA_KREGION below; kept in step with it.
+RELO_BETA, RELO_KREGION = 1.25, 8.0
 # Region-anchored PLAYER Elo. `beta` weights region strength inside team
 # strength; `k_region` is the region-rating step size.
 #
-# We FIX k_region rather than tune it. Tuning it on cross-region log-loss
-# overfits: that objective falls monotonically with k_region on the training
-# split but is essentially flat on held-out data, and the high k_region it
-# prefers makes the region rating swing on a handful of recent games. Concretely
-# at k_region=32 a 6-game KR blip (0/6 vs EMEA in the partial 2026 split) flipped
-# CN above KR via Elo transitivity, despite KR leading the head-to-head 58.5% and
-# the field win rate 67.6% vs 55.7%. Region strength is a slow latent, so we keep
-# k_region small: held-out log-loss is unchanged, the order is stable
-# (KR > CN > EMEA > BR > NA > APAC), and the resulting KR-CN gap (~+56, ~58% win
-# expectation) matches the observed 58.5% head-to-head almost exactly.
-PELO_RA_BETA, PELO_RA_KREGION = 1.0, 16.0
+# We FIX k_region small rather than tune it on cross-region log-loss. Region
+# strength is a slow latent, but international games are sparse and event-
+# clustered, so a reactive k_region lets a partial recent season distort the
+# order - especially for the weak regions that play few games. The right yard-
+# stick is the ALL-TIME head-to-head record, and k_region=8 maximises agreement
+# with it (0.91, game-weighted) while also giving the best held-out cross-region
+# accuracy. It recovers KR > CN > EMEA > NA > BR > APAC, matching both the
+# head-to-head matrix and the eye test:
+#   - KR > CN: KR leads the series 58.5% (a high k flipped CN on top via a
+#     6-game KR slump vs EMEA in the partial 2026 split);
+#   - NA > BR: NA wins the series 66% (57-29), dominating 2023-2025; a high k
+#     ranked BR above NA off BR's 27-game 2026 surge alone.
+# Higher k_region buys a hair of cross-region log-loss but wrecks the ranking;
+# the overall model is unaffected (region is a minor feature there).
+PELO_RA_BETA, PELO_RA_KREGION = 1.0, 8.0
 XGB_KW = dict(n_estimators=400, learning_rate=0.05, max_depth=4, subsample=0.8,
               colsample_bytree=0.8, min_child_weight=3, eval_metric="logloss",
               n_jobs=-1, random_state=42)

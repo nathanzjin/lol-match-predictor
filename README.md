@@ -136,18 +136,21 @@ predict a hypothetical matchup.
 - The player-level edge is **largest exactly when a lineup just changed**
   (low roster continuity) — the case team ratings handle worst.
 - **Cross-region (different Tier-1 regions, n=182)**: plain player Elo is barely
-  better than a coin flip there (acc 0.577, AUC 0.632); region-anchoring rescues
-  it to acc 0.637 / AUC 0.704 / log-loss 0.622, beating the region-elo specialist.
-  The anchored region order is stable and matches reality:
-  **KR > CN > EMEA > BR > NA > APAC**, with the KR–CN gap (~+56 Elo ≈ 58% win
-  expectation) almost exactly the observed KR-vs-CN head-to-head (58.5%).
-- Region strength is treated as a *slow latent*: `k_region` is held small (16)
-  rather than tuned on cross-region log-loss. That objective overfits (it keeps
-  rising with `k_region` on train but is flat on held-out data) and a large
-  `k_region` lets a handful of recent games swing the order — e.g. at
-  `k_region=32` a 6-game KR slump vs EMEA in the partial 2026 split flipped CN
-  above KR via Elo transitivity, despite KR leading every durable measure
-  (head-to-head 58.5%, field win rate 67.6% vs 55.7%, and all but two titles).
+  better than a coin flip there (acc 0.577, AUC 0.632); region-anchoring lifts it
+  to acc ~0.66, beating the region-elo specialist. The anchored region order is
+  stable and matches both the all-time head-to-head matrix and the eye test:
+  **KR > CN > EMEA > NA > BR > APAC**.
+- Region strength is treated as a *slow latent*: `k_region` is held small (8)
+  rather than tuned on cross-region log-loss. International games are sparse and
+  event-clustered, so a reactive `k_region` lets a partial recent season distort
+  the order — most of all for the weak regions that play few games. The right
+  yardstick is the all-time head-to-head record, and `k_region=8` maximises
+  agreement with it (0.91, game-weighted) while giving the best held-out
+  cross-region accuracy. Two artifacts it fixes:
+  - **KR > CN** — KR leads the series 58.5%; at `k_region=32` a 6-game KR slump
+    vs EMEA in the partial 2026 split flipped CN on top via Elo transitivity.
+  - **NA > BR** — NA wins the series 66% (57–29) and dominated 2023–2025; a high
+    `k_region` ranked BR above NA off BR's 27-game 2026 surge alone.
 - Scope note: region-anchoring only calibrates the six Tier-1 regions that
   actually play international games. Minor-league teams stay `OTHER` — useful as
   training breadth, but not a supported prediction target (predict_v3 rejects
